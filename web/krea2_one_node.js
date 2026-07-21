@@ -22,11 +22,11 @@ const LS_KEY = "krea2_onenode_state";
 
 // Size presets (base generation size; the latent upscale factor applies on top).
 const PRESETS = [
-  { w: 1024, h: 1024 },  // 1:1
   { w: 1920, h: 1088 },  // 1080p landscape
   { w: 1088, h: 1920 },  // 1080p portrait
   { w: 1280, h: 720 },   // 720p landscape
   { w: 720,  h: 1280 },  // 720p portrait
+  { w: 1024, h: 1024 },  // 1:1
   { w: 512,  h: 512 },   // 1:1 small
 ];
 const CUSTOM = -1;
@@ -40,7 +40,7 @@ const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
 function defaultState() {
   return {
     prompt: "",
-    presetIdx: 3,               // 1280×720
+    presetIdx: 2,               // 1280×720
     customW: 1280, customH: 720,
     batch: 1,
     seed: Math.floor(Math.random() * 1e15),
@@ -62,7 +62,7 @@ function defaultState() {
 function loadState() {
   try {
     const s = Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}"));
-    if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 3;
+    if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
     return s;
   }
   catch (e) { return defaultState(); }
