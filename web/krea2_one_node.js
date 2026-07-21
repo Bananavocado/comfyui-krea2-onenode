@@ -20,15 +20,14 @@ const MIN_W = 760;
 const MIN_H = 430;
 const LS_KEY = "krea2_onenode_state";
 
-// Size presets: base resolution + tuned latent upscale factor (spec table).
+// Size presets (base generation size; the latent upscale factor applies on top).
 const PRESETS = [
-  { w: 640,  h: 960,  scale: 1.8 },   // 2:3 portrait
-  { w: 672,  h: 896,  scale: 1.8 },   // 3:4 portrait
-  { w: 576,  h: 1024, scale: 1.8 },   // 9:16 tall
-  { w: 960,  h: 640,  scale: 1.8 },   // 3:2 landscape
-  { w: 896,  h: 672,  scale: 1.8 },   // 4:3 landscape
-  { w: 1024, h: 576,  scale: 1.8 },   // 16:9 widescreen
-  { w: 768,  h: 768,  scale: 1.8 },   // 1:1 square
+  { w: 1024, h: 1024 },  // 1:1
+  { w: 1920, h: 1088 },  // 1080p landscape
+  { w: 1088, h: 1920 },  // 1080p portrait
+  { w: 1280, h: 720 },   // 720p landscape
+  { w: 720,  h: 1280 },  // 720p portrait
+  { w: 512,  h: 512 },   // 1:1 small
 ];
 const CUSTOM = -1;
 
@@ -41,8 +40,8 @@ const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
 function defaultState() {
   return {
     prompt: "",
-    presetIdx: 5,               // 1024×576 (matches the source graph)
-    customW: 1024, customH: 576,
+    presetIdx: 3,               // 1280×720
+    customW: 1280, customH: 720,
     batch: 1,
     seed: Math.floor(Math.random() * 1e15),
     randomizeSeed: true,
@@ -61,7 +60,11 @@ function defaultState() {
   };
 }
 function loadState() {
-  try { return Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}")); }
+  try {
+    const s = Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}"));
+    if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 3;
+    return s;
+  }
   catch (e) { return defaultState(); }
 }
 function saveState(S) {
