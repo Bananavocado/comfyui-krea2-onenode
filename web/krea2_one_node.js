@@ -554,9 +554,17 @@ app.registerExtension({
       });
       left.appendChild(advPanel);
 
-      function advRow(...children) {
-        const r = mk("div", { display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" });
-        r.append(...children);
+      // grid row: label+control pairs locked on one line; controls shrink, never wrap
+      function advGrid(...pairs) {
+        const cols = pairs.map(([, , w]) => `auto ${w || "1fr"}`).join(" ");
+        const r = mk("div", { display: "grid", gridTemplateColumns: cols, gap: "7px", alignItems: "center" });
+        for (const [labelTxt, control] of pairs) {
+          r.appendChild(advCap(labelTxt));
+          control.style.width = "100%";
+          control.style.minWidth = "0";
+          control.style.boxSizing = "border-box";
+          r.appendChild(control);
+        }
         return r;
       }
       const advDivider = (t) => {
@@ -568,17 +576,15 @@ app.registerExtension({
 
       // pass 1
       advPanel.appendChild(advDivider("Pass 1 · base"));
-      const p1Steps = NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); }, "48px");
-      const p1Cfg = NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); }, "48px");
-      advPanel.appendChild(advRow(advCap("Steps"), p1Steps, advCap("CFG"), p1Cfg));
+      const p1Steps = NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); });
+      const p1Cfg = NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); });
+      advPanel.appendChild(advGrid(["Steps", p1Steps], ["CFG", p1Cfg]));
       const p1Samp = DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); });
-      p1Samp.style.width = "92px";
       const p1Sched = DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); });
-      p1Sched.style.width = "78px";
-      advPanel.appendChild(advRow(advCap("Sampler"), p1Samp, advCap("Sched"), p1Sched));
+      advPanel.appendChild(advGrid(["Sampler", p1Samp], ["Sched", p1Sched]));
 
       // seed (reference keeps seed in the advanced box)
-      const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); }, "104px");
+      const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); });
       const randChip = mk("button", {
         background: "none", border: "none", cursor: "pointer", outline: "none",
         display: "flex", alignItems: "center", gap: "4px", padding: "0 2px", flexShrink: "0",
@@ -605,27 +611,30 @@ app.registerExtension({
         seedIn.style.opacity = S.randomizeSeed ? ".45" : "1";
         reuseBtn.style.opacity = S.lastSeed != null ? "1" : ".4";
       }
-      advPanel.appendChild(advRow(advCap("Seed"), seedIn, noDrag(randChip), noDrag(reuseBtn)));
+      {
+        const seedRow = mk("div", { display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "7px", alignItems: "center" });
+        seedRow.appendChild(advCap("Seed"));
+        seedIn.style.width = "100%"; seedIn.style.minWidth = "0"; seedIn.style.boxSizing = "border-box";
+        seedRow.append(seedIn, noDrag(randChip), noDrag(reuseBtn));
+        advPanel.appendChild(seedRow);
+      }
       syncSeedUI();
 
       // pass 2
       advPanel.appendChild(advDivider("Pass 2 · refine"));
-      const p2Steps = NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); }, "48px");
-      const p2Cfg = NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); }, "48px");
-      const p2Start = NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); }, "48px");
-      advPanel.appendChild(advRow(advCap("Steps"), p2Steps, advCap("CFG"), p2Cfg, advCap("Start"), p2Start));
+      const p2Steps = NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); });
+      const p2Cfg = NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); });
+      const p2Start = NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); });
+      advPanel.appendChild(advGrid(["Steps", p2Steps], ["CFG", p2Cfg], ["Start", p2Start]));
       const p2Samp = DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); });
-      p2Samp.style.width = "92px";
       const p2Sched = DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); });
-      p2Sched.style.width = "78px";
-      advPanel.appendChild(advRow(advCap("Sampler"), p2Samp, advCap("Sched"), p2Sched));
+      advPanel.appendChild(advGrid(["Sampler", p2Samp], ["Sched", p2Sched]));
 
       // upscale
       advPanel.appendChild(advDivider("Upscale (latent)"));
       const upMeth = DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); });
-      upMeth.style.width = "104px";
-      const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); }, "48px");
-      advPanel.appendChild(advRow(advCap("Method"), upMeth, advCap("×"), upFac));
+      const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); });
+      advPanel.appendChild(advGrid(["Method", upMeth], ["×", upFac]));
 
       const syncAdv = () => { advPanel.style.display = S.advancedUI ? "flex" : "none"; };
       syncAdv();
