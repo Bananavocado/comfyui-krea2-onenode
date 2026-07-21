@@ -11,6 +11,7 @@ const C = {
   bg3: "#222222", border: "#2a2a2a", borderH: "#3c3c3c",
   text: "#dedede", muted: "#565656", dim: "#2e2e2e",
   warn: "#ffb347", err: "#ff6767", ok: "#7ddc82",
+  adv: "#8a8ade", advBorder: "#44447e",
 };
 
 const NODE_W = 980;
@@ -19,16 +20,17 @@ const LS_KEY = "krea2_onenode_state";
 
 // Size presets: base resolution + tuned latent upscale factor (spec table).
 const PRESETS = [
-  { label: "2:3 portrait",    w: 640,  h: 960,  scale: 1.8 },
-  { label: "3:4 portrait",    w: 672,  h: 896,  scale: 1.8 },
-  { label: "9:16 tall",       w: 576,  h: 1024, scale: 1.8 },
-  { label: "3:2 landscape",   w: 960,  h: 640,  scale: 1.8 },
-  { label: "4:3 landscape",   w: 896,  h: 672,  scale: 1.8 },
-  { label: "16:9 widescreen", w: 1024, h: 576,  scale: 1.8 },
-  { label: "1:1 square",      w: 768,  h: 768,  scale: 1.8 },
+  { w: 640,  h: 960,  scale: 1.8 },   // 2:3 portrait
+  { w: 672,  h: 896,  scale: 1.8 },   // 3:4 portrait
+  { w: 576,  h: 1024, scale: 1.8 },   // 9:16 tall
+  { w: 960,  h: 640,  scale: 1.8 },   // 3:2 landscape
+  { w: 896,  h: 672,  scale: 1.8 },   // 4:3 landscape
+  { w: 1024, h: 576,  scale: 1.8 },   // 16:9 widescreen
+  { w: 768,  h: 768,  scale: 1.8 },   // 1:1 square
 ];
+const CUSTOM = -1;
 
-const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "res_multistep", "lcm", "ddim", "uni_pc"];
+const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "res_multistep", "lcm", "ddim", "uni_pc", "er_sde"];
 const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", "beta", "linear_quadratic", "kl_optimal"];
 const UPSCALE_METHODS = ["bislerp", "nearest-exact", "bilinear", "area", "bicubic"];
 const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
@@ -37,13 +39,19 @@ const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
 function defaultState() {
   return {
     prompt: "",
-    presetIdx: 5,               // 16:9 widescreen (matches the source graph 1024×576)
+    presetIdx: 5,               // 1024×576 (matches the source graph)
+    customW: 1024, customH: 576,
     batch: 1,
     seed: Math.floor(Math.random() * 1e15),
     randomizeSeed: true,
     lastSeed: null,
     loras: [],                  // {on, name, strength}
     autoSave: true,
+    soundOn: true,
+    advancedUI: false,
+    modelUnet: "krea2_turbo_bf16.safetensors",
+    modelClip: "qwen3vl_4b_fp8_scaled.safetensors",
+    modelVae: "qwen_image_vae.safetensors",
     p1: { steps: 8, cfg: 1.0, sampler: "euler", scheduler: "simple", endStep: 8 },
     p2: { steps: 10, cfg: 0.8, sampler: "dpmpp_2m_sde", scheduler: "sgm_uniform", startStep: 5 },
     upscaleMethod: "bislerp",
@@ -69,6 +77,26 @@ function _isVueNodes() {
   } catch (e) { return false; }
 }
 
+// completion chime (reference-style gentle two-tone)
+function playDone() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    const mkTone = (freq, t0, dur) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "sine"; o.frequency.value = freq;
+      g.gain.setValueAtTime(0, ctx.currentTime + t0);
+      g.gain.linearRampToValueAtTime(0.18, ctx.currentTime + t0 + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t0 + dur);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(ctx.currentTime + t0); o.stop(ctx.currentTime + t0 + dur + 0.05);
+    };
+    mkTone(660, 0, 0.35);
+    mkTone(880, 0.13, 0.45);
+    setTimeout(() => ctx.close?.(), 1200);
+  } catch (e) {}
+}
+
 // ── tiny DOM helpers (mirroring the reference) ───────────────────────────────
 const mk = (tag, css = {}, props = {}) => { const e = document.createElement(tag); Object.assign(e.style, css); Object.assign(e, props); return e; };
 const tx = (e, t) => { e.textContent = t; return e; };
@@ -81,7 +109,6 @@ const noDrag = (e) => {
   return e;
 };
 
-// one-shot CSS (light sweep on Generate hover)
 if (!document.getElementById("krea2-onenode-css")) {
   const st = document.createElement("style");
   st.id = "krea2-onenode-css";
@@ -108,7 +135,6 @@ function Pill(txt, active, onClick, disabled) {
   return noDrag(b);
 }
 
-// toolbar button (Help / Settings style)
 function TBtn(txt, onClick, disabled) {
   const b = mk("button", {
     background: "transparent", border: `1.5px solid ${C.borderH}`,
@@ -127,7 +153,6 @@ function TBtn(txt, onClick, disabled) {
   return noDrag(b);
 }
 
-// number-input look (reference NI)
 function NI(val, min, max, step, onChange, width = "72px") {
   const inp = mk("input", {
     width, height: "28px", background: C.bg2, border: `1px solid ${C.border}`,
@@ -141,9 +166,33 @@ function NI(val, min, max, step, onChange, width = "72px") {
   return noDrag(inp);
 }
 
+// iOS-style toggle (reference preferences)
+function Toggle(on, onChange) {
+  const t = mk("button", {
+    width: "40px", height: "22px", borderRadius: "20px", border: "none",
+    cursor: "pointer", position: "relative", outline: "none", flexShrink: "0",
+    transition: "background .18s",
+  });
+  const knob = mk("div", {
+    position: "absolute", top: "3px", width: "16px", height: "16px",
+    borderRadius: "50%", transition: "left .18s, background .18s",
+  });
+  t.appendChild(knob);
+  const sync = () => {
+    t.style.background = t._on ? LIME : C.bg3;
+    knob.style.left = t._on ? "21px" : "3px";
+    knob.style.background = t._on ? "#111" : C.muted;
+  };
+  t._on = !!on;
+  sync();
+  t.onclick = (e) => { e.stopPropagation(); t._on = !t._on; sync(); onChange(t._on); };
+  t._set = (v) => { t._on = !!v; sync(); };
+  return noDrag(t);
+}
+
 // custom dropdown (reference DD): dark trigger, lime value, fixed filterable panel
 function DD(items, selected, onChange, labelOf) {
-  const lbl = labelOf || ((x) => x);
+  const lbl = labelOf || ((x) => String(x));
   let val = selected;
   const wrap = mk("div", { position: "relative", width: "100%", minWidth: "0" });
   const trig = mk("div", {
@@ -156,7 +205,7 @@ function DD(items, selected, onChange, labelOf) {
     fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis",
     whiteSpace: "nowrap", flex: "1", minWidth: "0",
   });
-  const setTxt = () => { tx(trigTxt, val ? lbl(val) : "— select —"); trigTxt.style.color = val ? LIME : C.muted; };
+  const setTxt = () => { tx(trigTxt, val != null ? lbl(val) : "— select —"); trigTxt.style.color = val != null ? LIME : C.muted; };
   setTxt();
   const arr = mk("span", { fontSize: "8px", color: C.muted, marginLeft: "5px", flexShrink: "0" });
   tx(arr, "▾");
@@ -214,7 +263,6 @@ function DD(items, selected, onChange, labelOf) {
   return noDrag(wrap);
 }
 
-// lime chip (reference "+ Add LoRA")
 function LimeChip(txtStr, onClick) {
   const b = mk("button", {
     background: "linear-gradient(135deg,rgba(240,255,65,.10),rgba(240,255,65,.04))",
@@ -239,7 +287,6 @@ function LimeChip(txtStr, onClick) {
   return noDrag(b);
 }
 
-// small dark chip ("Use as…", "Save")
 function DarkChip(txtStr, onClick, disabled) {
   const b = mk("button", {
     background: "rgba(10,10,10,.85)", border: `1px solid ${C.borderH}`,
@@ -257,8 +304,6 @@ function DarkChip(txtStr, onClick, disabled) {
 }
 
 // ── global websocket listeners ───────────────────────────────────────────────
-// Registered once (guarded for hot reload). Events are filtered by the active
-// prompt_id so foreign queue runs don't hijack the preview.
 function _active() { return window.__krea2_active || null; }
 function _isOurs(evt) {
   const a = _active();
@@ -293,6 +338,7 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     a.setStatus("Done.", C.ok);
+    if (a.S.soundOn) playDone();
     a.done();
     a.S._promptId = null;
   });
@@ -387,7 +433,7 @@ app.registerExtension({
     nodeType.prototype._buildUI = function () {
       const self = this;
       const S = loadState();
-      S._loraFiles = [];
+      S._models = { diffusion_models: [], text_encoders: [], vaes: [], loras: [] };
       S._generating = false;
       const persist = () => saveState(S);
 
@@ -400,7 +446,7 @@ app.registerExtension({
       });
       root.addEventListener("wheel", (e) => e.stopPropagation(), { passive: false });
 
-      // ── toolbar: mode pills left, Gallery/Help/Settings right ──────────────
+      // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
       for (const m of MODES) {
         const p = Pill(m, m === "T2I", () => {}, m !== "T2I");
@@ -423,15 +469,11 @@ app.registerExtension({
       helpBtn.title = "Help — coming in a later phase";
       toolbar.appendChild(helpBtn);
 
-      let settingsOpen = false;
-      const settingsBtn = TBtn("⚙ Settings", () => {
-        settingsOpen = !settingsOpen;
-        settingsPanel.style.display = settingsOpen ? "flex" : "none";
-      });
+      const settingsBtn = TBtn("⚙ Settings", () => { settingsOverlay.style.display = "flex"; });
       toolbar.appendChild(settingsBtn);
       root.appendChild(toolbar);
 
-      // ── main row: left controls 300px / right preview ──────────────────────
+      // ── main row ───────────────────────────────────────────────────────────
       const mainRow = mk("div", { display: "flex", gap: "12px", alignItems: "stretch", flex: "1", minHeight: "0" });
       root.appendChild(mainRow);
 
@@ -439,25 +481,32 @@ app.registerExtension({
         width: "300px", flexShrink: "0", minHeight: "0", overflowY: "auto", overflowX: "hidden",
         display: "flex", flexDirection: "column",
       });
+      left.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
       mainRow.appendChild(left);
 
-      // SIZE
+      // SIZE — dropdown of "W × H" + Custom…, like the original
       left.appendChild(cap("Size"));
-      const presetDD = DD(
-        () => PRESETS.map((_, i) => i),
-        S.presetIdx,
-        (i) => { S.presetIdx = i; persist(); syncSize(); },
-        (i) => PRESETS[i].label,
-      );
+      const sizeItems = () => [...PRESETS.map((_, i) => i), CUSTOM];
+      const sizeLbl = (i) => i === CUSTOM ? "Custom…" : `${PRESETS[i].w} × ${PRESETS[i].h}`;
+      const presetDD = DD(sizeItems, S.presetIdx, (i) => {
+        S.presetIdx = i;
+        if (i !== CUSTOM) { S.customW = PRESETS[i].w; S.customH = PRESETS[i].h; }
+        persist(); syncSize();
+      }, sizeLbl);
       left.appendChild(presetDD);
 
       const whRow = mk("div", { display: "flex", alignItems: "center", gap: "6px", marginTop: "8px" });
-      const wBox = mk("div", {
-        width: "72px", height: "28px", background: C.bg2, border: `1px solid ${C.border}`,
-        borderRadius: "6px", boxSizing: "border-box", display: "flex", alignItems: "center",
-        padding: "0 7px", fontSize: "11px", color: C.text,
-      });
-      const hBox = wBox.cloneNode();
+      const dims = () => S.presetIdx === CUSTOM
+        ? { w: S.customW, h: S.customH }
+        : { w: PRESETS[S.presetIdx].w, h: PRESETS[S.presetIdx].h };
+      const wIn = NI(dims().w, 64, 4096, 16, (v) => {
+        S.customW = Math.max(64, Math.round((v || 64) / 16) * 16);
+        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
+      }, "72px");
+      const hIn = NI(dims().h, 64, 4096, 16, (v) => {
+        S.customH = Math.max(64, Math.round((v || 64) / 16) * 16);
+        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
+      }, "72px");
       const swapBtn = mk("button", {
         background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
         width: "28px", height: "28px", cursor: "pointer", color: C.muted, fontSize: "12px",
@@ -468,36 +517,79 @@ app.registerExtension({
       swapBtn.onmouseleave = () => { swapBtn.style.color = C.muted; swapBtn.style.borderColor = C.border; };
       swapBtn.onclick = (e) => {
         e.stopPropagation();
-        const cur = PRESETS[S.presetIdx];
-        const j = PRESETS.findIndex(p => p.w === cur.h && p.h === cur.w);
-        if (j >= 0) { S.presetIdx = j; presetDD._setValue(j); persist(); syncSize(); }
+        const d = dims();
+        if (S.presetIdx !== CUSTOM) {
+          const j = PRESETS.findIndex(p => p.w === d.h && p.h === d.w);
+          if (j >= 0) { S.presetIdx = j; presetDD._setValue(j); persist(); syncSize(); return; }
+        }
+        S.customW = d.h; S.customH = d.w;
+        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
       };
       const finalTxt = mk("div", { fontSize: "9px", color: "rgba(240,255,65,.55)", fontWeight: "700", whiteSpace: "nowrap" });
-      whRow.append(wBox, noDrag(swapBtn), hBox, finalTxt);
+      whRow.append(wIn, noDrag(swapBtn), hIn, finalTxt);
       left.appendChild(whRow);
 
       function syncSize() {
-        const p = PRESETS[S.presetIdx] || PRESETS[5];
-        tx(wBox, String(p.w)); tx(hBox, String(p.h));
-        tx(finalTxt, `→ ${Math.round(p.w * S.upscaleBy)}×${Math.round(p.h * S.upscaleBy)}`);
+        const d = dims();
+        wIn.value = d.w; hIn.value = d.h;
+        tx(finalTxt, `→ ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
       }
 
-      // SEED
-      const seedCap = cap("Seed"); seedCap.style.marginTop = "14px";
-      left.appendChild(seedCap);
-      const seedRow = mk("div", { display: "flex", alignItems: "center", gap: "6px" });
-      const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); }, "128px");
-      const diceBtn = mk("button", {
-        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
-        height: "28px", padding: "0 8px", cursor: "pointer", fontSize: "12px",
-        outline: "none", transition: "all .15s",
+      // BATCH
+      const batchCap = cap("Batch"); batchCap.style.marginTop = "12px";
+      left.appendChild(batchCap);
+      const batchWrap = mk("div", { width: "90px" });
+      batchWrap.appendChild(DD(() => [1, 2, 4, 8], S.batch, (n) => { S.batch = n; persist(); }, (n) => `×${n}`));
+      left.appendChild(batchWrap);
+
+      // ── ADVANCED CONTROL box (indigo, toggled from Settings prefs) ─────────
+      const advCap = (t) => tx(mk("span", {
+        fontSize: "9px", fontWeight: "700", letterSpacing: ".08em",
+        textTransform: "uppercase", color: C.adv, flexShrink: "0",
+      }), t);
+      const advPanel = mk("div", {
+        display: "none", flexDirection: "column", gap: "8px",
+        border: `1.5px solid ${C.advBorder}`, borderRadius: "10px",
+        padding: "10px", marginTop: "12px", boxSizing: "border-box",
+      });
+      left.appendChild(advPanel);
+
+      function advRow(...children) {
+        const r = mk("div", { display: "flex", alignItems: "center", gap: "7px", flexWrap: "wrap" });
+        r.append(...children);
+        return r;
+      }
+      const advDivider = (t) => {
+        const d = mk("div", { display: "flex", alignItems: "center", gap: "6px", marginTop: "2px" });
+        d.appendChild(advCap(t));
+        d.appendChild(mk("div", { flex: "1", height: "1px", background: C.advBorder, opacity: ".5" }));
+        return d;
+      };
+
+      // pass 1
+      advPanel.appendChild(advDivider("Pass 1 · base"));
+      const p1Steps = NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); }, "48px");
+      const p1Cfg = NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); }, "48px");
+      advPanel.appendChild(advRow(advCap("Steps"), p1Steps, advCap("CFG"), p1Cfg));
+      const p1Samp = DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); });
+      p1Samp.style.width = "92px";
+      const p1Sched = DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); });
+      p1Sched.style.width = "78px";
+      advPanel.appendChild(advRow(advCap("Sampler"), p1Samp, advCap("Sched"), p1Sched));
+
+      // seed (reference keeps seed in the advanced box)
+      const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); }, "104px");
+      const randChip = mk("button", {
+        background: "none", border: "none", cursor: "pointer", outline: "none",
+        display: "flex", alignItems: "center", gap: "4px", padding: "0 2px", flexShrink: "0",
       }, { title: "Randomize seed each generation" });
-      tx(diceBtn, "🎲");
-      diceBtn.onclick = (e) => { e.stopPropagation(); S.randomizeSeed = !S.randomizeSeed; persist(); syncSeedUI(); };
+      const randIco = tx(mk("span", { fontSize: "11px" }), "⊡");
+      const randLbl = tx(mk("span", { fontSize: "9px", fontWeight: "700", letterSpacing: ".08em" }), "RANDOM");
+      randChip.append(randIco, randLbl);
+      randChip.onclick = (e) => { e.stopPropagation(); S.randomizeSeed = !S.randomizeSeed; persist(); syncSeedUI(); };
       const reuseBtn = mk("button", {
-        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
-        height: "28px", padding: "0 8px", cursor: "pointer", fontSize: "12px", color: C.muted,
-        outline: "none", transition: "all .15s",
+        background: "none", border: "none", cursor: "pointer", outline: "none",
+        color: C.muted, fontSize: "12px", padding: "0 2px", flexShrink: "0",
       }, { title: "Reuse last generation's seed" });
       tx(reuseBtn, "↩");
       reuseBtn.onclick = (e) => {
@@ -508,27 +600,37 @@ app.registerExtension({
         }
       };
       function syncSeedUI() {
-        diceBtn.style.borderColor = S.randomizeSeed ? LIME : C.border;
+        randIco.style.color = S.randomizeSeed ? LIME : C.muted;
+        randLbl.style.color = S.randomizeSeed ? LIME : C.muted;
         seedIn.style.opacity = S.randomizeSeed ? ".45" : "1";
         reuseBtn.style.opacity = S.lastSeed != null ? "1" : ".4";
       }
-      seedRow.append(seedIn, noDrag(diceBtn), noDrag(reuseBtn));
-      left.appendChild(seedRow);
+      advPanel.appendChild(advRow(advCap("Seed"), seedIn, noDrag(randChip), noDrag(reuseBtn)));
       syncSeedUI();
 
-      // BATCH
-      const batchCap = cap("Batch"); batchCap.style.marginTop = "14px";
-      left.appendChild(batchCap);
-      const batchWrap = mk("div", { width: "90px" });
-      batchWrap.appendChild(DD(
-        () => [1, 2, 4, 8],
-        S.batch,
-        (n) => { S.batch = n; persist(); },
-        (n) => `×${n}`,
-      ));
-      left.appendChild(batchWrap);
+      // pass 2
+      advPanel.appendChild(advDivider("Pass 2 · refine"));
+      const p2Steps = NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); }, "48px");
+      const p2Cfg = NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); }, "48px");
+      const p2Start = NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); }, "48px");
+      advPanel.appendChild(advRow(advCap("Steps"), p2Steps, advCap("CFG"), p2Cfg, advCap("Start"), p2Start));
+      const p2Samp = DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); });
+      p2Samp.style.width = "92px";
+      const p2Sched = DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); });
+      p2Sched.style.width = "78px";
+      advPanel.appendChild(advRow(advCap("Sampler"), p2Samp, advCap("Sched"), p2Sched));
 
-      // spacer then Generate pinned to bottom of the left column
+      // upscale
+      advPanel.appendChild(advDivider("Upscale (latent)"));
+      const upMeth = DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); });
+      upMeth.style.width = "104px";
+      const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); }, "48px");
+      advPanel.appendChild(advRow(advCap("Method"), upMeth, advCap("×"), upFac));
+
+      const syncAdv = () => { advPanel.style.display = S.advancedUI ? "flex" : "none"; };
+      syncAdv();
+
+      // spacer then Generate pinned to bottom
       left.appendChild(mk("div", { flex: "1", minHeight: "10px" }));
 
       const genRow = mk("div", { display: "flex", gap: "0", alignItems: "stretch", width: "100%", boxSizing: "border-box", flexShrink: "0" });
@@ -598,7 +700,6 @@ app.registerExtension({
       previewEmpty.innerHTML = "No image yet<br><span style='font-size:9px'>Generate to see the result here</span>";
       right.appendChild(previewEmpty);
 
-      // overlay chips on the preview (top-right)
       const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
       const saveChip = DarkChip("Save", () => doSaveTemp());
       saveChip.style.display = "none";
@@ -607,7 +708,6 @@ app.registerExtension({
       overlayTR.append(saveChip, useAsChip);
       right.appendChild(overlayTR);
 
-      // batch thumbnail strip (bottom overlay)
       const thumbStrip = mk("div", {
         position: "absolute", left: "8px", right: "8px", bottom: "8px",
         display: "none", gap: "6px", overflowX: "auto", zIndex: "5",
@@ -616,7 +716,7 @@ app.registerExtension({
       thumbStrip.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
       right.appendChild(thumbStrip);
 
-      // ── PROMPT (full width, bottom) ────────────────────────────────────────
+      // ── PROMPT ─────────────────────────────────────────────────────────────
       const promptWrap = mk("div", { display: "flex", flexDirection: "column", gap: "5px", flex: "0 0 auto" });
       const promptHdr = mk("div", { display: "flex", alignItems: "center", gap: "5px" });
       const promptCap = cap("Prompt"); promptCap.style.marginBottom = "0";
@@ -642,7 +742,6 @@ app.registerExtension({
       promptWrap.appendChild(promptTA);
       root.appendChild(promptWrap);
 
-      // bottom status row
       const statusLine = mk("div", {
         fontSize: "10px", color: C.muted, minHeight: "13px", flex: "0 0 auto",
         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
@@ -650,7 +749,7 @@ app.registerExtension({
       root.appendChild(statusLine);
       const setStatus = (t, color = C.muted) => { statusLine.textContent = t; statusLine.style.color = color; };
 
-      // ── LoRA overlay (reference-style modal inside the node) ───────────────
+      // ── LoRA overlay ───────────────────────────────────────────────────────
       const loraOverlay = mk("div", {
         position: "absolute", inset: "0", zIndex: "250", display: "none",
         alignItems: "center", justifyContent: "center",
@@ -709,10 +808,7 @@ app.registerExtension({
           loraRows.appendChild(tx(mk("div", { color: C.muted, fontSize: "11px" }), "No LoRAs — base model only."));
         }
         S.loras.forEach((row, idx) => {
-          const r = mk("div", {
-            display: "flex", alignItems: "center", gap: "8px",
-            opacity: row.on ? "1" : ".45",
-          });
+          const r = mk("div", { display: "flex", alignItems: "center", gap: "8px", opacity: row.on ? "1" : ".45" });
           const togBtn = mk("button", {
             background: "none", border: "none", cursor: "pointer", padding: "0 2px",
             color: row.on ? LIME : C.muted, fontSize: "13px", outline: "none", flexShrink: "0",
@@ -722,7 +818,7 @@ app.registerExtension({
           r.appendChild(noDrag(togBtn));
 
           const dd = DD(
-            () => S._loraFiles,
+            () => S._models.loras,
             row.name || null,
             (v) => { row.name = v; persist(); syncLoraBadge(); },
             (f) => f.replace(/\.safetensors$/i, ""),
@@ -749,77 +845,99 @@ app.registerExtension({
       }
       syncLoraBadge();
 
-      api.fetchApi("/krea2_onenode/models").then(r => r.json()).then(d => {
-        S._loraFiles = Array.isArray(d?.loras) ? d.loras : [];
-      }).catch(() => {});
+      // ── SETTINGS overlay (models + preferences, like the original) ─────────
+      const settingsOverlay = mk("div", {
+        position: "absolute", inset: "0", zIndex: "300", display: "none",
+        flexDirection: "column", background: C.bg0, borderRadius: "10px",
+        padding: "16px 20px", boxSizing: "border-box", gap: "14px",
+        overflowY: "auto",
+      });
+      noDrag(settingsOverlay);
+      settingsOverlay.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      root.appendChild(settingsOverlay);
 
-      // ── settings panel (anchored under the Settings button) ────────────────
-      const settingsPanel = mk("div", {
-        position: "absolute", top: "42px", right: "14px", width: "300px",
-        background: C.bg1, border: `1px solid ${C.borderH}`, borderRadius: "10px",
-        boxShadow: "0 12px 40px rgba(0,0,0,.9)", padding: "12px 14px 14px",
-        display: "none", flexDirection: "column", gap: "2px", zIndex: "200",
-        maxHeight: "calc(100% - 60px)", overflowY: "auto",
+      const setHdr = mk("div", { display: "flex", alignItems: "center", gap: "8px" });
+      const setTitle = mk("div", {
+        fontSize: "15px", fontWeight: "700", letterSpacing: ".12em",
+        textTransform: "uppercase", color: "#fff", flex: "1",
       });
-      noDrag(settingsPanel);
-      settingsPanel.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
-      root.appendChild(settingsPanel);
+      tx(setTitle, "Settings");
+      const refreshBtn = TBtn("↻ Refresh models", () => loadModels(true));
+      const closeBtn = mk("button", {
+        background: "transparent", border: `1.5px solid rgba(255,103,103,.55)`,
+        borderRadius: "6px", padding: "4px 11px", cursor: "pointer",
+        color: C.err, fontSize: "11px", fontWeight: "700", outline: "none",
+        transition: "all .15s",
+      });
+      tx(closeBtn, "× Close");
+      closeBtn.onmouseenter = () => { closeBtn.style.background = "rgba(255,103,103,.1)"; };
+      closeBtn.onmouseleave = () => { closeBtn.style.background = "transparent"; };
+      closeBtn.onclick = (e) => { e.stopPropagation(); settingsOverlay.style.display = "none"; };
+      setHdr.append(setTitle, refreshBtn, noDrag(closeBtn));
+      settingsOverlay.appendChild(setHdr);
 
-      function settingsHead(t) {
-        const d = cap(t); d.style.margin = "8px 0 4px"; d.style.color = "#8a8a8a";
-        return d;
+      // model pickers row
+      const modelsRow = mk("div", { display: "flex", gap: "16px" });
+      function modelCol(title, path, listKey, get, set) {
+        const col = mk("div", { flex: "1", minWidth: "0" });
+        const t = cap(title); t.style.marginBottom = "1px";
+        const p = mk("div", { fontSize: "10px", color: C.muted, marginBottom: "6px" });
+        tx(p, path);
+        const dd = DD(() => S._models[listKey], get() || null, (v) => { set(v); persist(); });
+        col.append(t, p, dd);
+        col._dd = dd;
+        return col;
       }
-      function settingsRow(text, control) {
-        const r = mk("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", margin: "3px 0" });
-        r.appendChild(tx(mk("div", { fontSize: "11px", color: C.muted, flex: "1" }), text));
-        control.style.width = "130px";
-        r.appendChild(control);
-        return r;
+      const unetCol = modelCol("Model", "/models/diffusion_models", "diffusion_models",
+        () => S.modelUnet, (v) => S.modelUnet = v);
+      const clipCol = modelCol("Text encoder", "/models/text_encoders", "text_encoders",
+        () => S.modelClip, (v) => S.modelClip = v);
+      const vaeCol = modelCol("VAE", "/models/vae", "vaes",
+        () => S.modelVae, (v) => S.modelVae = v);
+      modelsRow.append(unetCol, clipCol, vaeCol);
+      settingsOverlay.appendChild(modelsRow);
+
+      // preferences
+      const prefCap = cap("Preferences"); prefCap.style.marginTop = "10px";
+      settingsOverlay.appendChild(prefCap);
+      function prefRow(labelTxt, toggle, subTxt) {
+        const wrap = mk("div", { borderBottom: `1px solid ${C.dim}`, padding: "10px 0" });
+        const r = mk("div", { display: "flex", alignItems: "center", gap: "10px" });
+        r.appendChild(tx(mk("div", { fontSize: "13px", color: C.text, flex: "1" }), labelTxt));
+        r.appendChild(toggle);
+        wrap.appendChild(r);
+        if (subTxt) wrap.appendChild(tx(mk("div", { fontSize: "10px", color: C.muted, marginTop: "5px", lineHeight: "1.5" }), subTxt));
+        return wrap;
       }
-      settingsPanel.appendChild(settingsHead("Pass 1 · base"));
-      settingsPanel.appendChild(settingsRow("Steps", NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); }, "130px")));
-      settingsPanel.appendChild(settingsRow("CFG", NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); }, "130px")));
-      settingsPanel.appendChild(settingsRow("Sampler", DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Scheduler", DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); })));
-      settingsPanel.appendChild(settingsHead("Pass 2 · hi-res refine"));
-      settingsPanel.appendChild(settingsRow("Steps", NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); }, "130px")));
-      settingsPanel.appendChild(settingsRow("CFG", NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); }, "130px")));
-      settingsPanel.appendChild(settingsRow("Sampler", DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Scheduler", DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Start at step", NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); }, "130px")));
-      settingsPanel.appendChild(settingsHead("Upscale (latent)"));
-      settingsPanel.appendChild(settingsRow("Method", DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Factor", NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); }, "130px")));
-      settingsPanel.appendChild(settingsHead("Output"));
-      const autoSaveBtn = mk("button", {
-        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
-        height: "26px", padding: "0 10px", cursor: "pointer", fontSize: "11px",
-        color: C.text, outline: "none", transition: "all .15s", width: "130px",
-      });
-      autoSaveBtn.onclick = (e) => { e.stopPropagation(); S.autoSave = !S.autoSave; persist(); syncAutoSave(); };
-      function syncAutoSave() {
-        tx(autoSaveBtn, S.autoSave ? "On" : "Off");
-        autoSaveBtn.style.borderColor = S.autoSave ? LIME : C.border;
-        autoSaveBtn.style.color = S.autoSave ? LIME : C.muted;
-      }
-      syncAutoSave();
-      settingsPanel.appendChild(settingsRow("Auto-save", noDrag(autoSaveBtn)));
-      const openFolderBtn = mk("button", {
-        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
-        height: "26px", padding: "0 10px", cursor: "pointer", fontSize: "11px",
-        color: C.text, outline: "none", width: "130px",
-      });
-      tx(openFolderBtn, "Open folder");
-      openFolderBtn.onclick = (e) => {
-        e.stopPropagation();
+      settingsOverlay.appendChild(prefRow("Notification sound on complete",
+        Toggle(S.soundOn, (v) => { S.soundOn = v; persist(); })));
+      settingsOverlay.appendChild(prefRow("Advanced control (steps, CFG, sampler…)",
+        Toggle(S.advancedUI, (v) => { S.advancedUI = v; persist(); syncAdv(); })));
+      settingsOverlay.appendChild(prefRow("Auto-save results",
+        Toggle(S.autoSave, (v) => { S.autoSave = v; persist(); }),
+        "When off, results are temporary until you click Save on the preview."));
+      const folderRow = mk("div", { padding: "10px 0", display: "flex", alignItems: "center", gap: "10px" });
+      folderRow.appendChild(tx(mk("div", { fontSize: "13px", color: C.text, flex: "1" }), "Output folder"));
+      folderRow.appendChild(TBtn("Open", () => {
         api.fetchApi("/krea2_onenode/open_folder", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(S._lastImage?.type === "output" ? S._lastImage : {}),
         }).catch(() => {});
-      };
-      settingsPanel.appendChild(settingsRow("Output folder", noDrag(openFolderBtn)));
+      }));
+      settingsOverlay.appendChild(folderRow);
 
-      syncSize();
+      function loadModels(showStatus) {
+        return api.fetchApi("/krea2_onenode/models").then(r => r.json()).then(d => {
+          S._models = {
+            diffusion_models: d.diffusion_models || [],
+            text_encoders: d.text_encoders || [],
+            vaes: d.vaes || [],
+            loras: d.loras || [],
+          };
+          if (showStatus) setStatus("Model lists refreshed.", C.ok);
+        }).catch(() => { if (showStatus) setStatus("Model refresh failed.", C.err); });
+      }
+      loadModels(false);
 
       // ── image display helpers ──────────────────────────────────────────────
       function viewUrl(img) {
@@ -879,11 +997,15 @@ app.registerExtension({
 
       function buildPrompt(tpl) {
         const p = JSON.parse(JSON.stringify(tpl));
-        const preset = PRESETS[S.presetIdx] || PRESETS[5];
+        const d = dims();
+
+        p["K2:unet"].inputs.unet_name = S.modelUnet;
+        p["K2:clip"].inputs.clip_name = S.modelClip;
+        p["K2:vae"].inputs.vae_name = S.modelVae;
 
         p["K2:pos"].inputs.text = S.prompt || "";
-        p["K2:latent"].inputs.width = preset.w;
-        p["K2:latent"].inputs.height = preset.h;
+        p["K2:latent"].inputs.width = d.w;
+        p["K2:latent"].inputs.height = d.h;
         p["K2:latent"].inputs.batch_size = S.batch;
 
         if (S.randomizeSeed) S.seed = Math.floor(Math.random() * 1e15);
@@ -984,6 +1106,8 @@ app.registerExtension({
           } else setStatus(`Save failed: ${d.error}`, C.err);
         } catch (e) { setStatus(`Save failed: ${e.message}`, C.err); }
       }
+
+      syncSize();
 
       // ── mount + cache ──────────────────────────────────────────────────────
       window.__krea2_nodes[this.id] = { root, S, currentNode: this };

@@ -60,15 +60,23 @@ PromptServer.instance.routes.get("/krea2_onenode/workflow_generate")(
     _serve_json("workflows/generate_workflow.json"))
 
 
-@PromptServer.instance.routes.get("/krea2_onenode/models")
-async def get_models(request):
+def _scan_models(key):
     try:
         # Filter macOS AppleDouble/dot files that leak in from external volumes.
-        loras = [f for f in folder_paths.get_filename_list("loras")
-                 if not os.path.basename(f).startswith(".")]
+        return [f for f in folder_paths.get_filename_list(key)
+                if not os.path.basename(f).startswith(".")]
     except Exception:
-        loras = []
-    return web.json_response({"loras": loras})
+        return []
+
+
+@PromptServer.instance.routes.get("/krea2_onenode/models")
+async def get_models(request):
+    return web.json_response({
+        "diffusion_models": _scan_models("diffusion_models"),
+        "text_encoders": _scan_models("text_encoders"),
+        "vaes": _scan_models("vae"),
+        "loras": _scan_models("loras"),
+    })
 
 
 @PromptServer.instance.routes.post("/krea2_onenode/save_temp")
