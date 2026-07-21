@@ -60,7 +60,8 @@ function loadState() {
 }
 function saveState(S) {
   try {
-    const { _loraFiles, _generating, ...persistable } = S;
+    const persistable = {};
+    for (const [k, v] of Object.entries(S)) if (!k.startsWith("_")) persistable[k] = v;
     localStorage.setItem(LS_KEY, JSON.stringify(persistable));
   } catch (e) { /* quota — non-fatal */ }
 }
@@ -125,6 +126,66 @@ function iconBtn(txt, title, onClick, style = {}) {
   b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
   b.addEventListener("pointerdown", (e) => e.stopPropagation());
   return b;
+}
+
+// ── global websocket listeners ───────────────────────────────────────────────
+// Registered once (guarded for hot reload). Events are filtered by the active
+// prompt_id so foreign queue runs don't hijack the preview.
+function _active() { return window.__krea2_active || null; }
+function _isOurs(evt) {
+  const a = _active();
+  const pid = evt?.detail?.prompt_id;
+  return a && a.S._promptId && pid === a.S._promptId;
+}
+if (!window.__krea2_listeners) {
+  window.__krea2_listeners = true;
+
+  api.addEventListener("b_preview", (evt) => {
+    const a = _active();
+    if (a && a.S._generating && evt.detail instanceof Blob) a.showPreviewBlob(evt.detail);
+  });
+
+  api.addEventListener("progress", (evt) => {
+    if (!_isOurs(evt)) return;
+    const a = _active();
+    const d = evt.detail;
+    if (d?.max) a.setStatus(`Sampling ${d.value}/${d.max}`);
+  });
+
+  api.addEventListener("executed", (evt) => {
+    if (!_isOurs(evt)) return;
+    const a = _active();
+    const imgs = evt.detail?.output?.images;
+    if (!imgs?.length) return;
+    // Only the final image node emits here (SaveImage or the swapped-in PreviewImage).
+    a.showBatch(imgs);
+    a.showImage(imgs[0]);
+  });
+
+  api.addEventListener("execution_success", (evt) => {
+    if (!_isOurs(evt)) return;
+    const a = _active();
+    a.setStatus("Done.", "#39d98a");
+    a.done();
+    a.S._promptId = null;
+  });
+
+  api.addEventListener("execution_error", (evt) => {
+    if (!_isOurs(evt)) return;
+    const a = _active();
+    const d = evt.detail;
+    a.setStatus(`Error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 120)}`, "#ff5c5c");
+    a.done();
+    a.S._promptId = null;
+  });
+
+  api.addEventListener("execution_interrupted", (evt) => {
+    if (!_isOurs(evt)) return;
+    const a = _active();
+    a.setStatus("Interrupted.");
+    a.done();
+    a.S._promptId = null;
+  });
 }
 
 // ── extension ────────────────────────────────────────────────────────────────
@@ -487,13 +548,166 @@ app.registerExtension({
       settingsPanel.appendChild(settingsRow("Method", styledSelect(UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); })));
       settingsPanel.appendChild(settingsRow("Factor", numInput(S.upscaleBy, { min: 1, max: 4, step: 0.05, width: "130px" }, v => { S.upscaleBy = v; persist(); })));
 
-      // ── generation stubs (wired for real in Phase 1c) ──────────────────────
-      function doGenerate() {
-        setStatus("Generation wiring lands in Phase 1c.", C.faint);
-        console.log("[Krea2OneNode] generate clicked — state:", JSON.parse(JSON.stringify({ ...S, _loraFiles: undefined })));
+      // ── image display helpers ──────────────────────────────────────────────
+      function viewUrl(img) {
+        const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || "", type: img.type || "output", t: Date.now() });
+        return api.apiURL(`/view?${q}`);
       }
-      function doSaveTemp() {
-        setStatus("Save wiring lands in Phase 1c.", C.faint);
+      function showImage(img) {
+        S._lastImage = img;
+        previewImg.src = viewUrl(img);
+        previewImg.style.display = "";
+        previewEmpty.style.display = "none";
+        saveBtn.style.opacity = img.type === "temp" ? "1" : "0.4";
+        pushOutput(img);
+      }
+      function showBatch(images) {
+        thumbStrip.replaceChildren();
+        if (images.length <= 1) { thumbStrip.style.display = "none"; return; }
+        thumbStrip.style.display = "flex";
+        images.forEach((img) => {
+          const t = el("img", {
+            height: "56px", borderRadius: "6px", cursor: "pointer",
+            border: `1px solid ${C.line}`,
+          }, { src: viewUrl(img) });
+          t.addEventListener("pointerdown", (e) => e.stopPropagation());
+          t.addEventListener("click", (e) => { e.stopPropagation(); showImage(img); });
+          thumbStrip.appendChild(t);
+        });
+      }
+      function showPreviewBlob(blob) {
+        // live b_preview stream during sampling
+        try {
+          const url = URL.createObjectURL(blob);
+          const old = previewImg.dataset.blobUrl;
+          previewImg.src = url;
+          previewImg.dataset.blobUrl = url;
+          previewImg.style.display = "";
+          previewEmpty.style.display = "none";
+          if (old) URL.revokeObjectURL(old);
+        } catch (e) {}
+      }
+      function pushOutput(img) {
+        // let the Python placeholder replay this image on its IMAGE output
+        const nodeId = (window.__krea2_nodes && Object.entries(window.__krea2_nodes).find(([, v]) => v.S === S)?.[0]) ?? self.id;
+        api.fetchApi("/krea2_onenode/set_output", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ node_id: String(nodeId), ...img }),
+        }).catch(() => {});
+      }
+
+      // ── template patch + submit ────────────────────────────────────────────
+      let _template = null;
+      async function getTemplate() {
+        if (!_template) {
+          const r = await api.fetchApi("/krea2_onenode/workflow_generate");
+          if (!r.ok) throw new Error(`template fetch failed (${r.status})`);
+          _template = await r.json();
+        }
+        return _template;
+      }
+
+      function buildPrompt(tpl) {
+        const p = JSON.parse(JSON.stringify(tpl));
+        const preset = PRESETS[S.presetIdx] || PRESETS[5];
+
+        p["K2:pos"].inputs.text = S.prompt || "";
+        p["K2:latent"].inputs.width = preset.w;
+        p["K2:latent"].inputs.height = preset.h;
+        p["K2:latent"].inputs.batch_size = S.batch;
+
+        if (S.randomizeSeed) S.seed = Math.floor(Math.random() * 1e15);
+        S.lastSeed = S.seed;
+        seedIn.value = S.seed;
+        syncSeedUI();
+        p["K2:seed"].inputs.seed = S.seed;
+
+        // LoRA stack → Power Lora Loader dynamic inputs
+        let li = 1;
+        for (const row of S.loras) {
+          if (!row.name) continue;
+          p["K2:lora"].inputs[`lora_${li}`] = {
+            on: !!row.on, lora: row.name, strength: row.strength, strengthTwo: null,
+          };
+          li++;
+        }
+
+        // settings gear
+        p["K2:sampler1"].inputs.steps = S.p1.steps;
+        p["K2:sampler1"].inputs.cfg = S.p1.cfg;
+        p["K2:sampler1"].inputs.sampler_name = S.p1.sampler;
+        p["K2:sampler1"].inputs.scheduler = S.p1.scheduler;
+        p["K2:sampler1"].inputs.end_at_step = S.p1.endStep;
+        p["K2:sampler2"].inputs.steps = S.p2.steps;
+        p["K2:sampler2"].inputs.cfg = S.p2.cfg;
+        p["K2:sampler2"].inputs.sampler_name = S.p2.sampler;
+        p["K2:sampler2"].inputs.scheduler = S.p2.scheduler;
+        p["K2:sampler2"].inputs.start_at_step = S.p2.startStep;
+        p["K2:upscale"].inputs.upscale_method = S.upscaleMethod;
+        p["K2:upscale"].inputs.scale_by = S.upscaleBy;
+
+        // auto-save off → PreviewImage (temp) instead of SaveImage
+        if (!S.autoSave) {
+          p["K2:save"] = {
+            inputs: { images: p["K2:save"].inputs.images },
+            class_type: "PreviewImage",
+            _meta: { title: "Preview (unsaved)" },
+          };
+        }
+        return p;
+      }
+
+      async function doGenerate() {
+        if (S._generating) return;
+        if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.danger); return; }
+        S._generating = true;
+        genBtn.textContent = "Generating…";
+        genBtn.style.opacity = "0.6";
+        setStatus("Queued…");
+        persist();
+        try {
+          const prompt = buildPrompt(await getTemplate());
+          const resp = await api.fetchApi("/prompt", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+          });
+          const result = await resp.json();
+          if (!resp.ok || result.error) {
+            const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+            const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+              .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+            throw new Error(nodeErrs || msg);
+          }
+          S._promptId = result.prompt_id || null;
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate };
+          setStatus("Running…");
+        } catch (e) {
+          finishGenerate();
+          setStatus(`Error: ${e.message}`, C.danger);
+          console.error("[Krea2OneNode] submit failed:", e);
+        }
+      }
+      function finishGenerate() {
+        S._generating = false;
+        genBtn.textContent = "Generate";
+        genBtn.style.opacity = "1";
+      }
+
+      async function doSaveTemp() {
+        const img = S._lastImage;
+        if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save.", C.faint); return; }
+        try {
+          const r = await api.fetchApi("/krea2_onenode/save_temp", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ filename: img.filename, subfolder: img.subfolder || "" }),
+          });
+          const d = await r.json();
+          if (d.ok) {
+            S._lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
+            saveBtn.style.opacity = "0.4";
+            setStatus(`Saved as ${d.filename}`, C.ok);
+          } else setStatus(`Save failed: ${d.error}`, C.danger);
+        } catch (e) { setStatus(`Save failed: ${e.message}`, C.danger); }
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
