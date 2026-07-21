@@ -395,14 +395,20 @@ app.registerExtension({
 
     nodeType.prototype._mountUI = function (root) {
       const self = this;
+      // Widget size tracks the live node size so the dashboard fills the node
+      // at any user-dragged size (the layout engine treats computeSize/
+      // getMinHeight as fixed — it does not stretch DOM widgets for us).
+      const slotH0 = (LiteGraph.NODE_SLOT_HEIGHT || 20);
+      const rowsOf = () => Math.max((self.inputs || []).length, (self.outputs || []).length);
+      const innerH = () => Math.max(360, self.size[1] - rowsOf() * slotH0 - 8);
       this.addDOMWidget("k2_ui", "div", root, {
         getValue() { return null; }, setValue() {}, serialize: false,
         // classic mode: canvasOnly stops the Parameters side-panel stealing the widget;
         // Nodes 2.0 (Vue) skips canvasOnly widgets entirely, so it must be off there.
         canvasOnly: !_isVueNodes(),
-        // Minimum size only — the DOM widget stretches to fill the node, so the
-        // node resizes like any other (drag the bottom-right corner).
-        computeSize() { return [MIN_W, 380]; },
+        computeSize() { return [Math.max(MIN_W, self.size[0]), innerH()]; },
+        getMinHeight: innerH,
+        getMaxHeight: innerH,
       });
       const slotH = (LiteGraph.NODE_SLOT_HEIGHT || 20);
       const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
