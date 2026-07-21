@@ -26,6 +26,8 @@ const PRESETS = [
   { w: 1088, h: 1920 },  // 1080p portrait
   { w: 1280, h: 720 },   // 720p landscape
   { w: 720,  h: 1280 },  // 720p portrait
+  { w: 640,  h: 480 },   // VGA landscape
+  { w: 480,  h: 640 },   // VGA portrait
   { w: 1024, h: 1024 },  // 1:1
   { w: 512,  h: 512 },   // 1:1 small
 ];
