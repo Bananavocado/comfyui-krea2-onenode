@@ -16,6 +16,8 @@ const C = {
 
 const NODE_W = 980;
 const NODE_H = Math.round(NODE_W * 9 / 16);
+const MIN_W = 760;
+const MIN_H = 430;
 const LS_KEY = "krea2_onenode_state";
 
 // Size presets: base resolution + tuned latent upscale factor (spec table).
@@ -376,7 +378,7 @@ app.registerExtension({
     if (nodeData?.name !== "Krea2OneNode") return;
 
     nodeType.prototype.onNodeCreated = function () {
-      this.color = C.bg0; this.bgcolor = C.bg0; this.resizable = false;
+      this.color = C.bg0; this.bgcolor = C.bg0; this.resizable = true;
       this.outputs = [];
       if (this.widgets) this.widgets = [];
       this.addOutput("image", "IMAGE");
@@ -398,15 +400,15 @@ app.registerExtension({
         // classic mode: canvasOnly stops the Parameters side-panel stealing the widget;
         // Nodes 2.0 (Vue) skips canvasOnly widgets entirely, so it must be off there.
         canvasOnly: !_isVueNodes(),
-        computeSize() {
-          const slotH = (LiteGraph.NODE_SLOT_HEIGHT || 20);
-          const rows = Math.max((self.inputs || []).length, (self.outputs || []).length);
-          return [NODE_W, NODE_H + rows * slotH];
-        },
+        // Minimum size only — the DOM widget stretches to fill the node, so the
+        // node resizes like any other (drag the bottom-right corner).
+        computeSize() { return [MIN_W, 380]; },
       });
       const slotH = (LiteGraph.NODE_SLOT_HEIGHT || 20);
       const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
-      this.setSize([NODE_W, NODE_H + rows * slotH]);
+      if (!this.size || this.size[0] < MIN_W || this.size[1] < MIN_H + rows * slotH) {
+        this.setSize([NODE_W, NODE_H + rows * slotH]);
+      }
 
       const hideBadge = () => {
         let e = root;
@@ -426,9 +428,11 @@ app.registerExtension({
     };
 
     nodeType.prototype.onResize = function () {
+      // Free resize with a sane floor so the dashboard never collapses.
       const slotH = (LiteGraph.NODE_SLOT_HEIGHT || 20);
       const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
-      this.size = [NODE_W, NODE_H + rows * slotH];
+      this.size[0] = Math.max(this.size[0], MIN_W);
+      this.size[1] = Math.max(this.size[1], MIN_H + rows * slotH);
     };
     nodeType.prototype.onDrawConnections = function () {};
     nodeType.prototype.getSlotMenuOptions = function () { return []; };
@@ -446,11 +450,11 @@ app.registerExtension({
       const persist = () => saveState(S);
 
       const root = mk("div", {
-        width: "100%", height: NODE_H + "px", boxSizing: "border-box",
+        width: "100%", height: "100%", boxSizing: "border-box",
         background: C.bg0, color: C.text, display: "flex", flexDirection: "column",
         gap: "10px", padding: "12px 14px",
         fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", fontSize: "12px",
-        borderRadius: "10px", overflow: "hidden", position: "relative", userSelect: "none",
+        borderRadius: "8px", overflow: "hidden", position: "relative", userSelect: "none",
       });
       root.addEventListener("wheel", (e) => e.stopPropagation(), { passive: false });
 
