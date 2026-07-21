@@ -456,10 +456,10 @@ app.registerExtension({
     };
     nodeType.prototype.onDrawConnections = function () {};
     nodeType.prototype.getSlotMenuOptions = function () { return []; };
-    nodeType.prototype.onRemoved = function () {
-      const c = window.__krea2_nodes?.[this.id];
-      if (c && c.currentNode === this) delete window.__krea2_nodes[this.id];
-    };
+    // NOTE: no onRemoved cache cleanup — onRemoved also fires on a workflow
+    // SWITCH (graph cleared), and deleting the cache there wiped the UI state
+    // and the in-flight result. The cache must survive tab switches so the
+    // preview is still there when the user comes back.
 
     // ── UI build ─────────────────────────────────────────────────────────────
     nodeType.prototype._buildUI = function () {
@@ -736,6 +736,15 @@ app.registerExtension({
 
       const previewImg = mk("img", { maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none" });
       noDrag(previewImg);
+      previewImg.onerror = () => {
+        // Restored image no longer on disk (e.g. temp cleared by a ComfyUI
+        // restart) — fall back to the empty state instead of a broken icon.
+        if ((previewImg.src || "").includes("/view")) {
+          previewImg.style.display = "none";
+          previewEmpty.style.display = "";
+          saveChip.style.display = "none";
+        }
+      };
       right.appendChild(previewImg);
       const previewEmpty = mk("div", { color: C.muted, fontSize: "11px", textAlign: "center", lineHeight: "1.7" });
       previewEmpty.innerHTML = "No image yet<br><span style='font-size:9px'>Generate to see the result here</span>";
@@ -962,7 +971,7 @@ app.registerExtension({
       folderRow.appendChild(TBtn("Open", () => {
         api.fetchApi("/krea2_onenode/open_folder", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(S._lastImage?.type === "output" ? S._lastImage : {}),
+          body: JSON.stringify(S.lastImage?.type === "output" ? S.lastImage : {}),
         }).catch(() => {});
       }));
       settingsOverlay.appendChild(folderRow);
@@ -986,7 +995,7 @@ app.registerExtension({
         return api.apiURL(`/view?${q}`);
       }
       function showImage(img) {
-        S._lastImage = img;
+        S.lastImage = img;
         previewImg.src = viewUrl(img);
         previewImg.style.display = "";
         previewEmpty.style.display = "none";
@@ -1132,7 +1141,7 @@ app.registerExtension({
       }
 
       async function doSaveTemp() {
-        const img = S._lastImage;
+        const img = S.lastImage;
         if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save."); return; }
         try {
           const r = await api.fetchApi("/krea2_onenode/save_temp", {
@@ -1141,7 +1150,7 @@ app.registerExtension({
           });
           const d = await r.json();
           if (d.ok) {
-            S._lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
+            S.lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
             saveChip.style.display = "none";
             setStatus(`Saved as ${d.filename}`, C.ok);
           } else setStatus(`Save failed: ${d.error}`, C.err);
@@ -1149,6 +1158,15 @@ app.registerExtension({
       }
 
       syncSize();
+
+      // Restore the last result into the preview after a rebuild (page reload,
+      // workflow switch that didn't hit the cache) — the image is on disk.
+      if (S.lastImage?.filename) {
+        previewImg.src = viewUrl(S.lastImage);
+        previewImg.style.display = "";
+        previewEmpty.style.display = "none";
+        saveChip.style.display = S.lastImage.type === "temp" ? "" : "none";
+      }
 
       // ── mount + cache ──────────────────────────────────────────────────────
       window.__krea2_nodes[this.id] = { root, S, currentNode: this };
