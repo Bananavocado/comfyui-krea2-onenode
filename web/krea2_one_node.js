@@ -214,7 +214,7 @@ function DD(items, selected, onChange, labelOf) {
     display: "none", position: "fixed", background: C.bg1,
     border: `1px solid ${C.borderH}`, borderRadius: "8px", zIndex: "999999",
     flexDirection: "column", boxShadow: "0 8px 28px rgba(0,0,0,.9)",
-    overflow: "hidden", minWidth: "140px", maxWidth: "420px",
+    overflow: "hidden", minWidth: "140px",
   });
   const srch = mk("input", {
     background: C.bg2, border: "none", borderBottom: `1px solid ${C.border}`,
@@ -245,14 +245,22 @@ function DD(items, selected, onChange, labelOf) {
   trig.onclick = () => {
     if (panel.style.display === "flex") { close(); return; }
     const rect = trig.getBoundingClientRect();
+    // The node UI is scaled by the canvas zoom, but this panel lives on
+    // document.body (unscaled). Scale it to match so it lines up with the
+    // trigger at any zoom level.
+    let s = 1;
+    try { s = app.canvas?.ds?.scale || 1; } catch (e) {}
+    panel.style.transformOrigin = "top left";
+    panel.style.transform = `scale(${s})`;
     panel.style.left = rect.left + "px";
-    panel.style.width = Math.max(rect.width, 140) + "px";
-    const ph = Math.min(items().length * 28 + 44, 244);
+    panel.style.width = Math.max(rect.width / s, 140) + "px";
+    const ph = Math.min(items().length * 28 + 44, 244) * s;
     const fitsBelow = rect.bottom + 4 + ph <= window.innerHeight - 8;
     panel.style.top = (fitsBelow ? rect.bottom + 4 : Math.max(8, rect.top - ph - 4)) + "px";
     srch.value = ""; render("");
     panel.style.display = "flex";
-    srch.focus();
+    list.scrollTop = 0;
+    srch.focus({ preventScroll: true });
     document.addEventListener("pointerdown", onDoc, true);
   };
   srch.oninput = () => render(srch.value);
