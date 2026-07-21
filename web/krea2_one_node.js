@@ -1,15 +1,23 @@
 // One Node · Krea 2 — frontend dashboard
-// Architecture copied from one-node-flux-2-klein: the Python node is a placeholder;
-// this file renders the whole UI in a DOM widget, and (Phase 1c) patches the
-// API-format workflow template and submits it to ComfyUI's /prompt queue.
+// Architecture and visual design copied from one-node-flux-2-klein: the Python
+// node is a placeholder; this file renders the whole UI in a DOM widget,
+// patches the API-format workflow template and submits it to /prompt.
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
+const LIME = "#f0ff41";
+const C = {
+  lime: LIME, bg0: "#0b0b0b", bg1: "#111111", bg2: "#181818",
+  bg3: "#222222", border: "#2a2a2a", borderH: "#3c3c3c",
+  text: "#dedede", muted: "#565656", dim: "#2e2e2e",
+  warn: "#ffb347", err: "#ff6767", ok: "#7ddc82",
+};
+
 const NODE_W = 980;
-const NODE_H = Math.round(980 * 9 / 16); // 551
+const NODE_H = Math.round(NODE_W * 9 / 16);
 const LS_KEY = "krea2_onenode_state";
 
-// Size presets: base resolution + tuned latent upscale factor (spec §4 table).
+// Size presets: base resolution + tuned latent upscale factor (spec table).
 const PRESETS = [
   { label: "2:3 portrait",    w: 640,  h: 960,  scale: 1.8 },
   { label: "3:4 portrait",    w: 672,  h: 896,  scale: 1.8 },
@@ -23,15 +31,7 @@ const PRESETS = [
 const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "res_multistep", "lcm", "ddim", "uni_pc"];
 const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", "beta", "linear_quadratic", "kl_optimal"];
 const UPSCALE_METHODS = ["bislerp", "nearest-exact", "bilinear", "area", "bicubic"];
-
 const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
-
-// ── colors ───────────────────────────────────────────────────────────────────
-const C = {
-  bg0: "#101014", bg1: "#17171d", bg2: "#1f1f27", bg3: "#282833",
-  line: "#2e2e3a", text: "#e7e7ee", dim: "#9a9aa8", faint: "#5c5c6b",
-  accent: "#4ea3ff", accentText: "#0b1016", danger: "#ff5c5c", ok: "#39d98a",
-};
 
 // ── state ────────────────────────────────────────────────────────────────────
 function defaultState() {
@@ -44,19 +44,15 @@ function defaultState() {
     lastSeed: null,
     loras: [],                  // {on, name, strength}
     autoSave: true,
-    // settings gear (defaults = source graph)
     p1: { steps: 8, cfg: 1.0, sampler: "euler", scheduler: "simple", endStep: 8 },
     p2: { steps: 10, cfg: 0.8, sampler: "dpmpp_2m_sde", scheduler: "sgm_uniform", startStep: 5 },
     upscaleMethod: "bislerp",
     upscaleBy: 1.8,
   };
 }
-
 function loadState() {
-  try {
-    const s = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
-    return Object.assign(defaultState(), s);
-  } catch (e) { return defaultState(); }
+  try { return Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}")); }
+  catch (e) { return defaultState(); }
 }
 function saveState(S) {
   try {
@@ -73,59 +69,191 @@ function _isVueNodes() {
   } catch (e) { return false; }
 }
 
-// ── tiny DOM helpers ─────────────────────────────────────────────────────────
-function el(tag, style = {}, props = {}) {
-  const e = document.createElement(tag);
-  Object.assign(e.style, style);
-  Object.assign(e, props);
+// ── tiny DOM helpers (mirroring the reference) ───────────────────────────────
+const mk = (tag, css = {}, props = {}) => { const e = document.createElement(tag); Object.assign(e.style, css); Object.assign(e, props); return e; };
+const tx = (e, t) => { e.textContent = t; return e; };
+const cap = (t) => tx(mk("div", {
+  fontSize: "9px", fontWeight: "700", letterSpacing: ".1em",
+  textTransform: "uppercase", color: C.muted, marginBottom: "5px",
+}), t);
+const noDrag = (e) => {
+  e.addEventListener("pointerdown", (ev) => ev.stopPropagation());
   return e;
-}
-const stopWheel = (e) => e.stopPropagation(); // keep canvas from zooming under scrollable panels
+};
 
-function styledSelect(options, value, onChange) {
-  const s = el("select", {
-    background: C.bg2, color: C.text, border: `1px solid ${C.line}`,
-    borderRadius: "6px", padding: "5px 8px", fontSize: "12px", outline: "none",
-    width: "100%", cursor: "pointer",
+// one-shot CSS (light sweep on Generate hover)
+if (!document.getElementById("krea2-onenode-css")) {
+  const st = document.createElement("style");
+  st.id = "krea2-onenode-css";
+  st.textContent = `@keyframes k2-light-sweep{0%{left:-80%;opacity:1}100%{left:130%;opacity:0}}`;
+  document.head.appendChild(st);
+}
+
+function Pill(txt, active, onClick, disabled) {
+  const b = mk("button", {
+    background: active ? LIME : C.bg2, color: active ? "#111" : (disabled ? C.muted : C.text),
+    border: `1px solid ${active ? LIME : C.border}`,
+    borderRadius: "20px", padding: "3px 9px", fontSize: "9px",
+    fontWeight: active ? "700" : "400", cursor: disabled ? "not-allowed" : "pointer",
+    transition: "all .14s", outline: "none", whiteSpace: "nowrap",
+    opacity: disabled ? ".5" : "1",
   });
-  for (const o of options) {
-    const opt = el("option", {}, { value: o.value ?? o, textContent: o.label ?? o });
-    s.appendChild(opt);
+  tx(b, txt);
+  if (!disabled) {
+    b.onmousedown = () => b.style.transform = "scale(.95)";
+    b.onmouseup = () => b.style.transform = "";
+    b.onmouseleave = () => b.style.transform = "";
+    b.onclick = onClick;
   }
-  s.value = value;
-  s.addEventListener("change", () => onChange(s.value));
-  s.addEventListener("pointerdown", (e) => e.stopPropagation());
-  return s;
+  return noDrag(b);
 }
 
-function numInput(value, { min, max, step = 1, width = "64px" }, onChange) {
-  const i = el("input", {
-    background: C.bg2, color: C.text, border: `1px solid ${C.line}`,
-    borderRadius: "6px", padding: "4px 6px", fontSize: "12px", width,
-    outline: "none",
-  }, { type: "number", value, min, max, step });
-  i.addEventListener("change", () => onChange(parseFloat(i.value)));
-  i.addEventListener("pointerdown", (e) => e.stopPropagation());
-  i.addEventListener("keydown", (e) => e.stopPropagation());
-  return i;
+// toolbar button (Help / Settings style)
+function TBtn(txt, onClick, disabled) {
+  const b = mk("button", {
+    background: "transparent", border: `1.5px solid ${C.borderH}`,
+    borderRadius: "6px", padding: "4px 11px", cursor: disabled ? "not-allowed" : "pointer",
+    color: C.muted, fontSize: "11px", fontWeight: "700",
+    display: "flex", alignItems: "center", gap: "5px",
+    transition: "opacity .15s, border-color .15s, color .15s", outline: "none",
+    opacity: disabled ? ".45" : "1",
+  });
+  tx(b, txt);
+  if (!disabled) {
+    b.onmouseenter = () => { b.style.borderColor = C.text; b.style.color = C.text; };
+    b.onmouseleave = () => { b.style.borderColor = C.borderH; b.style.color = C.muted; };
+    b.onclick = onClick;
+  }
+  return noDrag(b);
 }
 
-function label(text, size = "10px") {
-  return el("div", {
-    color: C.dim, fontSize: size, letterSpacing: "0.08em",
-    textTransform: "uppercase", margin: "10px 0 4px",
-  }, { textContent: text });
+// number-input look (reference NI)
+function NI(val, min, max, step, onChange, width = "72px") {
+  const inp = mk("input", {
+    width, height: "28px", background: C.bg2, border: `1px solid ${C.border}`,
+    borderRadius: "6px", boxSizing: "border-box", color: C.text,
+    fontSize: "11px", padding: "0 7px", outline: "none", transition: "border-color .15s",
+  }, { type: "number", value: val, min, max, step });
+  inp.onfocus = () => inp.style.borderColor = LIME;
+  inp.onblur = () => inp.style.borderColor = C.border;
+  inp.addEventListener("change", () => onChange(parseFloat(String(inp.value).replace(",", "."))));
+  inp.addEventListener("keydown", (e) => e.stopPropagation());
+  return noDrag(inp);
 }
 
-function iconBtn(txt, title, onClick, style = {}) {
-  const b = el("button", {
-    background: C.bg2, color: C.text, border: `1px solid ${C.line}`,
-    borderRadius: "6px", padding: "4px 9px", fontSize: "12px", cursor: "pointer",
-    ...style,
-  }, { textContent: txt, title });
-  b.addEventListener("click", (e) => { e.stopPropagation(); onClick(); });
-  b.addEventListener("pointerdown", (e) => e.stopPropagation());
-  return b;
+// custom dropdown (reference DD): dark trigger, lime value, fixed filterable panel
+function DD(items, selected, onChange, labelOf) {
+  const lbl = labelOf || ((x) => x);
+  let val = selected;
+  const wrap = mk("div", { position: "relative", width: "100%", minWidth: "0" });
+  const trig = mk("div", {
+    background: C.bg3, border: `1px solid ${C.border}`, borderRadius: "7px",
+    padding: "0 8px", height: "28px", display: "flex", alignItems: "center",
+    justifyContent: "space-between", cursor: "pointer", boxSizing: "border-box",
+    transition: "border-color .15s", userSelect: "none", overflow: "hidden",
+  });
+  const trigTxt = mk("span", {
+    fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis",
+    whiteSpace: "nowrap", flex: "1", minWidth: "0",
+  });
+  const setTxt = () => { tx(trigTxt, val ? lbl(val) : "— select —"); trigTxt.style.color = val ? LIME : C.muted; };
+  setTxt();
+  const arr = mk("span", { fontSize: "8px", color: C.muted, marginLeft: "5px", flexShrink: "0" });
+  tx(arr, "▾");
+  trig.append(trigTxt, arr);
+  const panel = mk("div", {
+    display: "none", position: "fixed", background: C.bg1,
+    border: `1px solid ${C.borderH}`, borderRadius: "8px", zIndex: "999999",
+    flexDirection: "column", boxShadow: "0 8px 28px rgba(0,0,0,.9)",
+    overflow: "hidden", minWidth: "140px", maxWidth: "420px",
+  });
+  const srch = mk("input", {
+    background: C.bg2, border: "none", borderBottom: `1px solid ${C.border}`,
+    padding: "7px 10px", color: C.text, fontSize: "11px", outline: "none",
+    width: "100%", boxSizing: "border-box",
+  }, { type: "text", placeholder: "Type to filter…" });
+  srch.addEventListener("keydown", (e) => e.stopPropagation());
+  const list = mk("div", { overflowY: "auto", maxHeight: "200px" });
+  list.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+  const render = (q) => {
+    list.replaceChildren();
+    items().filter(i => !q || lbl(i).toLowerCase().includes(q.toLowerCase())).forEach(item => {
+      const isSel = item === val;
+      const r = mk("div", {
+        padding: "7px 12px", fontSize: "11px", cursor: "pointer",
+        color: isSel ? LIME : C.text, background: isSel ? C.bg2 : "transparent",
+        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", transition: "background .1s",
+      });
+      tx(r, lbl(item));
+      r.onmouseenter = () => r.style.background = C.bg3;
+      r.onmouseleave = () => r.style.background = item === val ? C.bg2 : "transparent";
+      r.onclick = () => { val = item; setTxt(); close(); onChange(item); };
+      list.appendChild(r);
+    });
+  };
+  const close = () => { panel.style.display = "none"; document.removeEventListener("pointerdown", onDoc, true); };
+  const onDoc = (e) => { if (!panel.contains(e.target) && !trig.contains(e.target)) close(); };
+  trig.onclick = () => {
+    if (panel.style.display === "flex") { close(); return; }
+    const rect = trig.getBoundingClientRect();
+    panel.style.left = rect.left + "px";
+    panel.style.width = Math.max(rect.width, 140) + "px";
+    const ph = Math.min(items().length * 28 + 44, 244);
+    const fitsBelow = rect.bottom + 4 + ph <= window.innerHeight - 8;
+    panel.style.top = (fitsBelow ? rect.bottom + 4 : Math.max(8, rect.top - ph - 4)) + "px";
+    srch.value = ""; render("");
+    panel.style.display = "flex";
+    srch.focus();
+    document.addEventListener("pointerdown", onDoc, true);
+  };
+  srch.oninput = () => render(srch.value);
+  panel.append(srch, list);
+  document.body.appendChild(panel);
+  wrap.appendChild(trig);
+  wrap._setValue = (v) => { val = v; setTxt(); };
+  return noDrag(wrap);
+}
+
+// lime chip (reference "+ Add LoRA")
+function LimeChip(txtStr, onClick) {
+  const b = mk("button", {
+    background: "linear-gradient(135deg,rgba(240,255,65,.10),rgba(240,255,65,.04))",
+    border: "1.5px solid rgba(240,255,65,.35)", cursor: "pointer",
+    padding: "2px 8px 2px 6px", color: LIME, outline: "none",
+    display: "flex", alignItems: "center", gap: "5px", borderRadius: "5px",
+    transition: "all .15s", flexShrink: "0",
+  });
+  const plus = mk("span", { fontSize: "11px", fontWeight: "700", lineHeight: "1" });
+  tx(plus, "+");
+  const t = mk("span", { fontSize: "9px", fontWeight: "700", letterSpacing: ".04em" });
+  tx(t, txtStr);
+  const badge = mk("span", {
+    fontSize: "7px", fontWeight: "700", background: LIME, color: "#111",
+    borderRadius: "20px", padding: "0 4px", lineHeight: "1.6", display: "none", flexShrink: "0",
+  });
+  b.append(plus, t, badge);
+  b.onmouseenter = () => { b.style.background = "linear-gradient(135deg,rgba(240,255,65,.18),rgba(240,255,65,.08))"; b.style.borderColor = LIME; };
+  b.onmouseleave = () => { b.style.background = "linear-gradient(135deg,rgba(240,255,65,.10),rgba(240,255,65,.04))"; b.style.borderColor = "rgba(240,255,65,.35)"; };
+  b.onclick = (e) => { e.stopPropagation(); onClick(); };
+  b._badge = badge;
+  return noDrag(b);
+}
+
+// small dark chip ("Use as…", "Save")
+function DarkChip(txtStr, onClick, disabled) {
+  const b = mk("button", {
+    background: "rgba(10,10,10,.85)", border: `1px solid ${C.borderH}`,
+    borderRadius: "6px", padding: "4px 10px", cursor: disabled ? "not-allowed" : "pointer",
+    color: disabled ? C.muted : C.text, fontSize: "10px", fontWeight: "700",
+    outline: "none", transition: "all .15s", opacity: disabled ? ".6" : "1",
+  });
+  tx(b, txtStr);
+  if (!disabled && onClick) {
+    b.onmouseenter = () => b.style.borderColor = C.text;
+    b.onmouseleave = () => b.style.borderColor = C.borderH;
+    b.onclick = (e) => { e.stopPropagation(); onClick(); };
+  }
+  return noDrag(b);
 }
 
 // ── global websocket listeners ───────────────────────────────────────────────
@@ -157,7 +285,6 @@ if (!window.__krea2_listeners) {
     const a = _active();
     const imgs = evt.detail?.output?.images;
     if (!imgs?.length) return;
-    // Only the final image node emits here (SaveImage or the swapped-in PreviewImage).
     a.showBatch(imgs);
     a.showImage(imgs[0]);
   });
@@ -165,7 +292,7 @@ if (!window.__krea2_listeners) {
   api.addEventListener("execution_success", (evt) => {
     if (!_isOurs(evt)) return;
     const a = _active();
-    a.setStatus("Done.", "#39d98a");
+    a.setStatus("Done.", C.ok);
     a.done();
     a.S._promptId = null;
   });
@@ -174,7 +301,7 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
-    a.setStatus(`Error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 120)}`, "#ff5c5c");
+    a.setStatus(`Error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 140)}`, C.err);
     a.done();
     a.S._promptId = null;
   });
@@ -203,7 +330,6 @@ app.registerExtension({
       if (!window.__krea2_nodes) window.__krea2_nodes = {};
       const cached = window.__krea2_nodes[this.id];
       if (cached) {
-        // Workflow switch: node instance rebuilt, reuse the cached DOM + state.
         cached.currentNode = this;
         this._mountUI(cached.root);
         return;
@@ -228,7 +354,6 @@ app.registerExtension({
       const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
       this.setSize([NODE_W, NODE_H + rows * slotH]);
 
-      // Nodes 2.0: hide the injected node-type badge.
       const hideBadge = () => {
         let e = root;
         for (let i = 0; i < 6; i++) {
@@ -266,287 +391,435 @@ app.registerExtension({
       S._generating = false;
       const persist = () => saveState(S);
 
-      const root = el("div", {
+      const root = mk("div", {
         width: "100%", height: NODE_H + "px", boxSizing: "border-box",
         background: C.bg0, color: C.text, display: "flex", flexDirection: "column",
-        fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", fontSize: "13px",
-        borderRadius: "8px", overflow: "hidden", position: "relative",
-        userSelect: "none",
+        gap: "10px", padding: "12px 14px",
+        fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", fontSize: "12px",
+        borderRadius: "10px", overflow: "hidden", position: "relative", userSelect: "none",
       });
-      root.addEventListener("wheel", stopWheel, { passive: false });
+      root.addEventListener("wheel", (e) => e.stopPropagation(), { passive: false });
 
-      // ── header: title + mode pills + gear ──────────────────────────────────
-      const header = el("div", {
-        display: "flex", alignItems: "center", gap: "10px",
-        padding: "10px 14px 8px", borderBottom: `1px solid ${C.line}`,
-        background: C.bg1, flex: "0 0 auto",
-      });
-      header.appendChild(el("div", { fontWeight: "700", fontSize: "14px", whiteSpace: "nowrap" },
-        { textContent: "One Node · Krea 2" }));
-
-      const pills = el("div", { display: "flex", gap: "6px", flex: "1", justifyContent: "center" });
+      // ── toolbar: mode pills left, Gallery/Help/Settings right ──────────────
+      const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
       for (const m of MODES) {
-        const active = m === "T2I";
-        const pill = el("div", {
-          padding: "4px 12px", borderRadius: "999px", fontSize: "11px", fontWeight: "600",
-          letterSpacing: "0.04em",
-          background: active ? C.accent : C.bg2,
-          color: active ? C.accentText : C.faint,
-          border: `1px solid ${active ? C.accent : C.line}`,
-          cursor: active ? "default" : "not-allowed",
-          opacity: active ? "1" : "0.55",
-        }, { textContent: m, title: active ? "Generate (text to image)" : `${m} — coming in a later phase` });
-        pills.appendChild(pill);
+        const p = Pill(m, m === "T2I", () => {}, m !== "T2I");
+        if (m !== "T2I") p.title = `${m} — coming in a later phase`;
+        toolbar.appendChild(p);
       }
-      header.appendChild(pills);
+      toolbar.appendChild(mk("div", { flex: "1" }));
+
+      const galleryBtn = mk("button", {
+        background: "linear-gradient(90deg,#1a1a2e,#0f3460,#533483)",
+        border: "1.5px solid rgba(255,255,255,.15)",
+        borderRadius: "6px", padding: "4px 11px", cursor: "not-allowed", color: "#e0e0ff",
+        fontSize: "11px", fontWeight: "700", display: "flex", alignItems: "center", gap: "5px",
+        outline: "none", opacity: ".45",
+      }, { title: "Gallery — coming in a later phase" });
+      galleryBtn.append(tx(mk("span", { fontSize: "12px" }), "▦"), tx(mk("span"), "Gallery"));
+      toolbar.appendChild(noDrag(galleryBtn));
+
+      const helpBtn = TBtn("✦ Help", null, true);
+      helpBtn.title = "Help — coming in a later phase";
+      toolbar.appendChild(helpBtn);
 
       let settingsOpen = false;
-      const gearBtn = iconBtn("⚙", "Two-pass sampler settings", () => {
+      const settingsBtn = TBtn("⚙ Settings", () => {
         settingsOpen = !settingsOpen;
-        settingsPanel.style.display = settingsOpen ? "block" : "none";
-        gearBtn.style.borderColor = settingsOpen ? C.accent : C.line;
-      }, { fontSize: "14px", padding: "3px 9px" });
-      header.appendChild(gearBtn);
-      root.appendChild(header);
-
-      // ── body: left controls / right preview ────────────────────────────────
-      const body = el("div", { display: "flex", flex: "1", minHeight: "0" });
-      root.appendChild(body);
-
-      // ---- left panel ----
-      const left = el("div", {
-        width: "355px", flex: "0 0 355px", padding: "10px 14px", boxSizing: "border-box",
-        borderRight: `1px solid ${C.line}`, background: C.bg1,
-        overflowY: "auto", display: "flex", flexDirection: "column",
+        settingsPanel.style.display = settingsOpen ? "flex" : "none";
       });
-      body.appendChild(left);
+      toolbar.appendChild(settingsBtn);
+      root.appendChild(toolbar);
 
-      // size preset
-      left.appendChild(label("Size"));
-      const presetSel = styledSelect(
-        PRESETS.map((p, i) => ({ value: String(i), label: `${p.label}  ·  ${p.w}×${p.h} → ${Math.round(p.w * p.scale)}×${Math.round(p.h * p.scale)}` })),
-        String(S.presetIdx),
-        (v) => { S.presetIdx = parseInt(v, 10); persist(); },
+      // ── main row: left controls 300px / right preview ──────────────────────
+      const mainRow = mk("div", { display: "flex", gap: "12px", alignItems: "stretch", flex: "1", minHeight: "0" });
+      root.appendChild(mainRow);
+
+      const left = mk("div", {
+        width: "300px", flexShrink: "0", minHeight: "0", overflowY: "auto", overflowX: "hidden",
+        display: "flex", flexDirection: "column",
+      });
+      mainRow.appendChild(left);
+
+      // SIZE
+      left.appendChild(cap("Size"));
+      const presetDD = DD(
+        () => PRESETS.map((_, i) => i),
+        S.presetIdx,
+        (i) => { S.presetIdx = i; persist(); syncSize(); },
+        (i) => PRESETS[i].label,
       );
-      left.appendChild(presetSel);
+      left.appendChild(presetDD);
 
-      // prompt
-      left.appendChild(label("Prompt"));
-      const promptBox = el("textarea", {
-        background: C.bg2, color: C.text, border: `1px solid ${C.line}`,
-        borderRadius: "8px", padding: "8px 10px", fontSize: "13px", lineHeight: "1.45",
-        width: "100%", height: "110px", resize: "none", outline: "none",
-        boxSizing: "border-box", fontFamily: "inherit",
-      }, { value: S.prompt, placeholder: "Describe the image…", spellcheck: false });
-      promptBox.addEventListener("input", () => { S.prompt = promptBox.value; persist(); });
-      promptBox.addEventListener("pointerdown", (e) => e.stopPropagation());
-      promptBox.addEventListener("keydown", (e) => e.stopPropagation());
-      left.appendChild(promptBox);
+      const whRow = mk("div", { display: "flex", alignItems: "center", gap: "6px", marginTop: "8px" });
+      const wBox = mk("div", {
+        width: "72px", height: "28px", background: C.bg2, border: `1px solid ${C.border}`,
+        borderRadius: "6px", boxSizing: "border-box", display: "flex", alignItems: "center",
+        padding: "0 7px", fontSize: "11px", color: C.text,
+      });
+      const hBox = wBox.cloneNode();
+      const swapBtn = mk("button", {
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
+        width: "28px", height: "28px", cursor: "pointer", color: C.muted, fontSize: "12px",
+        outline: "none", flexShrink: "0", transition: "color .15s,border-color .15s",
+      }, { title: "Swap orientation" });
+      tx(swapBtn, "⇅");
+      swapBtn.onmouseenter = () => { swapBtn.style.color = C.text; swapBtn.style.borderColor = C.borderH; };
+      swapBtn.onmouseleave = () => { swapBtn.style.color = C.muted; swapBtn.style.borderColor = C.border; };
+      swapBtn.onclick = (e) => {
+        e.stopPropagation();
+        const cur = PRESETS[S.presetIdx];
+        const j = PRESETS.findIndex(p => p.w === cur.h && p.h === cur.w);
+        if (j >= 0) { S.presetIdx = j; presetDD._setValue(j); persist(); syncSize(); }
+      };
+      const finalTxt = mk("div", { fontSize: "9px", color: "rgba(240,255,65,.55)", fontWeight: "700", whiteSpace: "nowrap" });
+      whRow.append(wBox, noDrag(swapBtn), hBox, finalTxt);
+      left.appendChild(whRow);
 
-      // LoRA stack
-      const loraHead = el("div", { display: "flex", alignItems: "center", justifyContent: "space-between" });
-      loraHead.appendChild(label("LoRA Stack"));
-      const addLoraBtn = iconBtn("+ Add LoRA", "Add a LoRA row", () => {
-        S.loras.push({ on: true, name: "", strength: 1.0 });
-        persist(); renderLoras();
-      }, { fontSize: "11px", marginTop: "6px" });
-      loraHead.appendChild(addLoraBtn);
-      left.appendChild(loraHead);
-
-      const loraList = el("div", { display: "flex", flexDirection: "column", gap: "6px" });
-      left.appendChild(loraList);
-
-      function renderLoras() {
-        loraList.replaceChildren();
-        if (!S.loras.length) {
-          loraList.appendChild(el("div", { color: C.faint, fontSize: "11px", padding: "2px 0 4px" },
-            { textContent: "No LoRAs — base model only." }));
-          return;
-        }
-        S.loras.forEach((row, idx) => {
-          const r = el("div", {
-            display: "flex", alignItems: "center", gap: "6px",
-            background: C.bg2, border: `1px solid ${C.line}`, borderRadius: "8px",
-            padding: "5px 7px", opacity: row.on ? "1" : "0.45",
-          });
-          // enable toggle
-          const tog = iconBtn(row.on ? "●" : "○", row.on ? "Disable" : "Enable", () => {
-            row.on = !row.on; persist(); renderLoras();
-          }, { padding: "1px 7px", color: row.on ? C.ok : C.faint, border: "none", background: "transparent", fontSize: "13px" });
-          r.appendChild(tog);
-          // file picker
-          const opts = [{ value: "", label: "— select LoRA —" },
-            ...S._loraFiles.map(f => ({ value: f, label: f.replace(/\.safetensors$/i, "") }))];
-          if (row.name && !S._loraFiles.includes(row.name)) opts.push({ value: row.name, label: row.name + " (missing)" });
-          const sel = styledSelect(opts, row.name, (v) => { row.name = v; persist(); });
-          sel.style.flex = "1"; sel.style.minWidth = "0";
-          r.appendChild(sel);
-          // strength
-          const st = numInput(row.strength, { min: -4, max: 4, step: 0.05, width: "52px" }, (v) => {
-            row.strength = isFinite(v) ? v : 1.0; persist();
-          });
-          st.title = "Strength";
-          r.appendChild(st);
-          // remove
-          r.appendChild(iconBtn("✕", "Remove", () => {
-            S.loras.splice(idx, 1); persist(); renderLoras();
-          }, { padding: "1px 6px", color: C.faint, border: "none", background: "transparent" }));
-          loraList.appendChild(r);
-        });
+      function syncSize() {
+        const p = PRESETS[S.presetIdx] || PRESETS[5];
+        tx(wBox, String(p.w)); tx(hBox, String(p.h));
+        tx(finalTxt, `→ ${Math.round(p.w * S.upscaleBy)}×${Math.round(p.h * S.upscaleBy)}`);
       }
 
-      // fetch lora filenames for the pickers
-      api.fetchApi("/krea2_onenode/models").then(r => r.json()).then(d => {
-        S._loraFiles = Array.isArray(d?.loras) ? d.loras : [];
-        renderLoras();
-      }).catch(() => renderLoras());
-      renderLoras();
-
-      // seed row
-      left.appendChild(label("Seed"));
-      const seedRow = el("div", { display: "flex", alignItems: "center", gap: "6px" });
-      const seedIn = numInput(S.seed, { min: 0, max: 1e15, step: 1, width: "150px" }, (v) => {
-        S.seed = Math.max(0, Math.floor(v || 0)); persist();
-      });
-      seedRow.appendChild(seedIn);
-      const randBtn = iconBtn("🎲", "Randomize seed each generation", () => {
-        S.randomizeSeed = !S.randomizeSeed; persist(); syncSeedUI();
-      });
-      seedRow.appendChild(randBtn);
-      const reuseBtn = iconBtn("↩", "Reuse last generation's seed", () => {
+      // SEED
+      const seedCap = cap("Seed"); seedCap.style.marginTop = "14px";
+      left.appendChild(seedCap);
+      const seedRow = mk("div", { display: "flex", alignItems: "center", gap: "6px" });
+      const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); }, "128px");
+      const diceBtn = mk("button", {
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
+        height: "28px", padding: "0 8px", cursor: "pointer", fontSize: "12px",
+        outline: "none", transition: "all .15s",
+      }, { title: "Randomize seed each generation" });
+      tx(diceBtn, "🎲");
+      diceBtn.onclick = (e) => { e.stopPropagation(); S.randomizeSeed = !S.randomizeSeed; persist(); syncSeedUI(); };
+      const reuseBtn = mk("button", {
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
+        height: "28px", padding: "0 8px", cursor: "pointer", fontSize: "12px", color: C.muted,
+        outline: "none", transition: "all .15s",
+      }, { title: "Reuse last generation's seed" });
+      tx(reuseBtn, "↩");
+      reuseBtn.onclick = (e) => {
+        e.stopPropagation();
         if (S.lastSeed != null) {
           S.seed = S.lastSeed; S.randomizeSeed = false;
           seedIn.value = S.seed; persist(); syncSeedUI();
         }
-      });
-      seedRow.appendChild(reuseBtn);
+      };
       function syncSeedUI() {
-        randBtn.style.borderColor = S.randomizeSeed ? C.accent : C.line;
-        randBtn.style.color = S.randomizeSeed ? C.accent : C.text;
-        seedIn.style.opacity = S.randomizeSeed ? "0.5" : "1";
-        reuseBtn.style.opacity = S.lastSeed != null ? "1" : "0.4";
+        diceBtn.style.borderColor = S.randomizeSeed ? LIME : C.border;
+        seedIn.style.opacity = S.randomizeSeed ? ".45" : "1";
+        reuseBtn.style.opacity = S.lastSeed != null ? "1" : ".4";
       }
-      syncSeedUI();
+      seedRow.append(seedIn, noDrag(diceBtn), noDrag(reuseBtn));
       left.appendChild(seedRow);
+      syncSeedUI();
 
-      // generate + batch
-      const genRow = el("div", { display: "flex", gap: "8px", marginTop: "14px", alignItems: "stretch" });
-      const genBtn = el("button", {
-        flex: "1", background: C.accent, color: C.accentText, border: "none",
-        borderRadius: "8px", padding: "10px", fontSize: "14px", fontWeight: "700",
-        cursor: "pointer", letterSpacing: "0.02em",
-      }, { textContent: "Generate" });
-      genBtn.addEventListener("pointerdown", (e) => e.stopPropagation());
+      // BATCH
+      const batchCap = cap("Batch"); batchCap.style.marginTop = "14px";
+      left.appendChild(batchCap);
+      const batchWrap = mk("div", { width: "90px" });
+      batchWrap.appendChild(DD(
+        () => [1, 2, 4, 8],
+        S.batch,
+        (n) => { S.batch = n; persist(); },
+        (n) => `×${n}`,
+      ));
+      left.appendChild(batchWrap);
+
+      // spacer then Generate pinned to bottom of the left column
+      left.appendChild(mk("div", { flex: "1", minHeight: "10px" }));
+
+      const genRow = mk("div", { display: "flex", gap: "0", alignItems: "stretch", width: "100%", boxSizing: "border-box", flexShrink: "0" });
+      const genBtn = mk("button", {
+        background: LIME, color: "#111", border: "2px solid transparent", borderRadius: "8px",
+        padding: "0", height: "38px", fontSize: "13px", fontWeight: "700",
+        cursor: "pointer", flex: "1", letterSpacing: ".02em",
+        transition: "background .3s,color .3s,border-color .3s,transform .1s",
+        outline: "none", position: "relative", overflow: "hidden",
+      });
+      tx(genBtn, "Generate");
+      const genSweep = mk("div", {
+        position: "absolute", top: "0", left: "-80%", width: "50%", height: "100%",
+        background: "linear-gradient(90deg,transparent 0%,rgba(255,255,255,.75) 50%,transparent 100%)",
+        transform: "skewX(-20deg)", pointerEvents: "none", opacity: "0",
+      });
+      genBtn.appendChild(genSweep);
+      genBtn.onmouseenter = () => {
+        if (!S._generating) {
+          genSweep.style.animation = "none"; void genSweep.offsetWidth;
+          genSweep.style.animation = "k2-light-sweep 1s ease forwards";
+        }
+      };
       genBtn.addEventListener("click", (e) => { e.stopPropagation(); doGenerate(); });
-      genRow.appendChild(genBtn);
-      const batchSel = styledSelect(
-        [1, 2, 4, 8].map(n => ({ value: String(n), label: `×${n}` })),
-        String(S.batch),
-        (v) => { S.batch = parseInt(v, 10); persist(); },
-      );
-      batchSel.style.width = "64px"; batchSel.style.flex = "0 0 64px";
-      batchSel.title = "Batch count";
-      genRow.appendChild(batchSel);
+      noDrag(genBtn);
+
+      const stopBtn = mk("button", {
+        background: "transparent", border: `1px solid ${C.border}`, borderRadius: "8px",
+        color: C.muted, fontSize: "12px", cursor: "pointer",
+        maxWidth: "0", minWidth: "0", width: "0", opacity: "0", padding: "0", height: "38px",
+        transition: "max-width .25s ease, opacity .25s ease, padding .25s ease, margin .25s ease",
+        outline: "none", overflow: "hidden", flexShrink: "0", whiteSpace: "nowrap",
+      });
+      tx(stopBtn, "■ Stop");
+      stopBtn.onmouseenter = () => { stopBtn.style.borderColor = C.err; stopBtn.style.color = C.err; };
+      stopBtn.onmouseleave = () => { stopBtn.style.borderColor = C.border; stopBtn.style.color = C.muted; };
+      stopBtn.onclick = async (e) => {
+        e.stopPropagation();
+        try { await api.fetchApi("/interrupt", { method: "POST" }); } catch (err) {}
+      };
+      noDrag(stopBtn);
+      function syncStop(running) {
+        if (running) {
+          stopBtn.style.maxWidth = "80px"; stopBtn.style.width = "auto";
+          stopBtn.style.opacity = "1"; stopBtn.style.padding = "0 12px"; stopBtn.style.marginLeft = "8px";
+        } else {
+          stopBtn.style.maxWidth = "0"; stopBtn.style.width = "0";
+          stopBtn.style.opacity = "0"; stopBtn.style.padding = "0"; stopBtn.style.marginLeft = "0";
+        }
+      }
+      genRow.append(genBtn, stopBtn);
       left.appendChild(genRow);
 
-      // status line
-      const statusLine = el("div", {
-        marginTop: "8px", fontSize: "11px", color: C.dim, minHeight: "15px",
-        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-      }, { textContent: "" });
-      left.appendChild(statusLine);
-      const setStatus = (t, color = C.dim) => { statusLine.textContent = t; statusLine.style.color = color; };
-
-      // ---- right panel ----
-      const right = el("div", { flex: "1", display: "flex", flexDirection: "column", minWidth: "0", background: C.bg0 });
-      body.appendChild(right);
-
-      const previewWrap = el("div", {
-        flex: "1", display: "flex", alignItems: "center", justifyContent: "center",
-        minHeight: "0", position: "relative", overflow: "hidden",
+      // ---- right: preview ----
+      const right = mk("div", {
+        flex: "1", minWidth: "0", minHeight: "0", position: "relative",
+        background: "#000", borderRadius: "8px", overflow: "hidden",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        border: `1px solid ${C.border}`,
       });
-      right.appendChild(previewWrap);
-      const previewImg = el("img", {
-        maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none",
-      });
-      previewImg.addEventListener("pointerdown", (e) => e.stopPropagation());
-      previewWrap.appendChild(previewImg);
-      const previewEmpty = el("div", { color: C.faint, fontSize: "12px", textAlign: "center" },
-        { innerHTML: "No image yet<br><span style='font-size:10px'>Generate to see the result here</span>" });
-      previewWrap.appendChild(previewEmpty);
+      mainRow.appendChild(right);
 
-      // batch thumbnail strip
-      const thumbStrip = el("div", {
-        display: "none", gap: "6px", padding: "6px 10px", overflowX: "auto",
-        flex: "0 0 auto", borderTop: `1px solid ${C.line}`, background: C.bg1,
+      const previewImg = mk("img", { maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none" });
+      noDrag(previewImg);
+      right.appendChild(previewImg);
+      const previewEmpty = mk("div", { color: C.muted, fontSize: "11px", textAlign: "center", lineHeight: "1.7" });
+      previewEmpty.innerHTML = "No image yet<br><span style='font-size:9px'>Generate to see the result here</span>";
+      right.appendChild(previewEmpty);
+
+      // overlay chips on the preview (top-right)
+      const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
+      const saveChip = DarkChip("Save", () => doSaveTemp());
+      saveChip.style.display = "none";
+      const useAsChip = DarkChip("Use as…  ▾", null, true);
+      useAsChip.title = "Send to I2I / Edit — coming with those modes";
+      overlayTR.append(saveChip, useAsChip);
+      right.appendChild(overlayTR);
+
+      // batch thumbnail strip (bottom overlay)
+      const thumbStrip = mk("div", {
+        position: "absolute", left: "8px", right: "8px", bottom: "8px",
+        display: "none", gap: "6px", overflowX: "auto", zIndex: "5",
+        padding: "4px", background: "rgba(10,10,10,.6)", borderRadius: "8px",
       });
+      thumbStrip.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
       right.appendChild(thumbStrip);
 
-      // output bar
-      const outBar = el("div", {
-        display: "flex", alignItems: "center", gap: "8px",
-        padding: "8px 12px", borderTop: `1px solid ${C.line}`, background: C.bg1,
-        flex: "0 0 auto",
-      });
-      const useAsSel = styledSelect([{ value: "", label: "Use as…" }], "", () => {});
-      useAsSel.disabled = true;
-      useAsSel.style.width = "110px"; useAsSel.style.opacity = "0.4"; useAsSel.style.cursor = "not-allowed";
-      useAsSel.title = "Send to I2I / Edit — coming with those modes";
-      outBar.appendChild(useAsSel);
-      outBar.appendChild(el("div", { flex: "1" }));
-      const saveBtn = iconBtn("Save", "Save the shown image to the output folder", () => doSaveTemp());
-      saveBtn.style.opacity = "0.4";
-      outBar.appendChild(saveBtn);
-      const autoSaveBtn = iconBtn("Auto-save", "When on, every generation is saved to the output folder", () => {
-        S.autoSave = !S.autoSave; persist(); syncAutoSave();
-      });
-      function syncAutoSave() {
-        autoSaveBtn.style.borderColor = S.autoSave ? C.accent : C.line;
-        autoSaveBtn.style.color = S.autoSave ? C.accent : C.text;
-        saveBtn.style.display = S.autoSave ? "none" : "";
-      }
-      syncAutoSave();
-      outBar.appendChild(autoSaveBtn);
-      outBar.appendChild(iconBtn("📁", "Open output folder", () => {
-        api.fetchApi("/krea2_onenode/open_folder", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(S._lastImage?.type === "output" ? S._lastImage : {}),
-        }).catch(() => {});
-      }));
-      right.appendChild(outBar);
+      // ── PROMPT (full width, bottom) ────────────────────────────────────────
+      const promptWrap = mk("div", { display: "flex", flexDirection: "column", gap: "5px", flex: "0 0 auto" });
+      const promptHdr = mk("div", { display: "flex", alignItems: "center", gap: "5px" });
+      const promptCap = cap("Prompt"); promptCap.style.marginBottom = "0";
+      const loraBtn = LimeChip("Add LoRA", () => { loraOverlay.style.display = "flex"; renderLoraRows(); });
+      loraBtn.style.marginLeft = "auto";
+      promptHdr.append(promptCap, loraBtn);
+      promptWrap.appendChild(promptHdr);
 
-      // ---- settings panel (overlay) ----
-      const settingsPanel = el("div", {
-        position: "absolute", top: "44px", right: "10px", width: "300px",
-        background: C.bg1, border: `1px solid ${C.line}`, borderRadius: "10px",
-        boxShadow: "0 8px 30px rgba(0,0,0,0.5)", padding: "10px 14px 14px",
-        display: "none", zIndex: "20",
+      const promptTA = mk("textarea", {
+        width: "100%", height: "64px", resize: "none",
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "8px",
+        color: C.text, fontSize: "12px", padding: "9px 12px",
+        boxSizing: "border-box", outline: "none", lineHeight: "1.55",
+        fontFamily: "inherit", transition: "border-color .15s", display: "block",
+      }, { placeholder: "Describe what you want to generate…", spellcheck: false });
+      promptTA.value = S.prompt;
+      promptTA.onfocus = () => promptTA.style.borderColor = LIME;
+      promptTA.onblur = () => promptTA.style.borderColor = C.border;
+      promptTA.oninput = () => { S.prompt = promptTA.value; persist(); };
+      promptTA.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); promptTA.blur(); } });
+      promptTA.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      noDrag(promptTA);
+      promptWrap.appendChild(promptTA);
+      root.appendChild(promptWrap);
+
+      // bottom status row
+      const statusLine = mk("div", {
+        fontSize: "10px", color: C.muted, minHeight: "13px", flex: "0 0 auto",
+        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
       });
-      settingsPanel.addEventListener("pointerdown", (e) => e.stopPropagation());
-      settingsPanel.addEventListener("wheel", stopWheel, { passive: false });
+      root.appendChild(statusLine);
+      const setStatus = (t, color = C.muted) => { statusLine.textContent = t; statusLine.style.color = color; };
+
+      // ── LoRA overlay (reference-style modal inside the node) ───────────────
+      const loraOverlay = mk("div", {
+        position: "absolute", inset: "0", zIndex: "250", display: "none",
+        alignItems: "center", justifyContent: "center",
+        padding: "14px", boxSizing: "border-box",
+      });
+      const loraBg = mk("div", { position: "absolute", inset: "0", background: "rgba(0,0,0,.6)" });
+      const loraPanel = mk("div", {
+        position: "relative",
+        background: "linear-gradient(145deg,#111 0%,#0d0d0d 100%)",
+        border: "1px solid rgba(240,255,65,.18)",
+        borderRadius: "16px", padding: "18px 20px 20px", width: "100%", maxWidth: "560px",
+        maxHeight: "100%",
+        boxShadow: "0 20px 60px rgba(0,0,0,.95),inset 0 1px 0 rgba(255,255,255,.04)",
+        display: "flex", flexDirection: "column", gap: "14px", boxSizing: "border-box",
+      });
+      noDrag(loraPanel);
+      const loraHdr = mk("div", { display: "flex", alignItems: "center", gap: "8px" });
+      const loraTitle = mk("div", {
+        fontSize: "12px", fontWeight: "700", color: "#fff", flex: "1",
+        letterSpacing: ".06em", textTransform: "uppercase",
+      });
+      tx(loraTitle, "LoRA");
+      const loraClose = mk("button", {
+        background: "none", border: "none", cursor: "pointer",
+        color: C.muted, fontSize: "16px", lineHeight: "1", padding: "0", outline: "none", flexShrink: "0",
+      });
+      tx(loraClose, "×");
+      loraClose.onmouseenter = () => loraClose.style.color = "#fff";
+      loraClose.onmouseleave = () => loraClose.style.color = C.muted;
+      const closeLora = () => { loraOverlay.style.display = "none"; };
+      loraClose.onclick = closeLora;
+      loraBg.onclick = closeLora;
+      loraHdr.append(loraTitle, loraClose);
+      const loraDivider = mk("div", { width: "100%", height: "1px", background: "rgba(240,255,65,.10)", marginTop: "-6px" });
+      const loraRows = mk("div", { display: "flex", flexDirection: "column", gap: "10px", overflowY: "auto", minHeight: "0" });
+      loraRows.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      const loraAddRow = LimeChip("Add LoRA", () => {
+        S.loras.push({ on: true, name: "", strength: 1.0 });
+        persist(); renderLoraRows();
+      });
+      loraAddRow.style.alignSelf = "flex-start";
+      loraPanel.append(loraHdr, loraDivider, loraRows, loraAddRow);
+      loraOverlay.append(loraBg, loraPanel);
+      root.appendChild(loraOverlay);
+
+      function syncLoraBadge() {
+        const n = S.loras.filter(l => l.name && l.on !== false).length;
+        tx(loraBtn._badge, String(n));
+        loraBtn._badge.style.display = n > 0 ? "" : "none";
+        loraBtn.style.borderColor = n > 0 ? LIME : "rgba(240,255,65,.35)";
+      }
+
+      function renderLoraRows() {
+        loraRows.replaceChildren();
+        if (!S.loras.length) {
+          loraRows.appendChild(tx(mk("div", { color: C.muted, fontSize: "11px" }), "No LoRAs — base model only."));
+        }
+        S.loras.forEach((row, idx) => {
+          const r = mk("div", {
+            display: "flex", alignItems: "center", gap: "8px",
+            opacity: row.on ? "1" : ".45",
+          });
+          const togBtn = mk("button", {
+            background: "none", border: "none", cursor: "pointer", padding: "0 2px",
+            color: row.on ? LIME : C.muted, fontSize: "13px", outline: "none", flexShrink: "0",
+          }, { title: row.on ? "Disable" : "Enable" });
+          tx(togBtn, row.on ? "●" : "○");
+          togBtn.onclick = (e) => { e.stopPropagation(); row.on = !row.on; persist(); renderLoraRows(); syncLoraBadge(); };
+          r.appendChild(noDrag(togBtn));
+
+          const dd = DD(
+            () => S._loraFiles,
+            row.name || null,
+            (v) => { row.name = v; persist(); syncLoraBadge(); },
+            (f) => f.replace(/\.safetensors$/i, ""),
+          );
+          dd.style.flex = "1"; dd.style.minWidth = "0";
+          r.appendChild(dd);
+
+          const st = NI(row.strength, -4, 4, 0.05, (v) => { row.strength = isFinite(v) ? v : 1.0; persist(); }, "58px");
+          st.title = "Strength";
+          r.appendChild(st);
+
+          const rm = mk("button", {
+            background: "none", border: "none", cursor: "pointer", padding: "0 2px",
+            color: C.muted, fontSize: "13px", outline: "none", flexShrink: "0",
+          }, { title: "Remove" });
+          tx(rm, "✕");
+          rm.onmouseenter = () => rm.style.color = C.err;
+          rm.onmouseleave = () => rm.style.color = C.muted;
+          rm.onclick = (e) => { e.stopPropagation(); S.loras.splice(idx, 1); persist(); renderLoraRows(); syncLoraBadge(); };
+          r.appendChild(noDrag(rm));
+
+          loraRows.appendChild(r);
+        });
+      }
+      syncLoraBadge();
+
+      api.fetchApi("/krea2_onenode/models").then(r => r.json()).then(d => {
+        S._loraFiles = Array.isArray(d?.loras) ? d.loras : [];
+      }).catch(() => {});
+
+      // ── settings panel (anchored under the Settings button) ────────────────
+      const settingsPanel = mk("div", {
+        position: "absolute", top: "42px", right: "14px", width: "300px",
+        background: C.bg1, border: `1px solid ${C.borderH}`, borderRadius: "10px",
+        boxShadow: "0 12px 40px rgba(0,0,0,.9)", padding: "12px 14px 14px",
+        display: "none", flexDirection: "column", gap: "2px", zIndex: "200",
+        maxHeight: "calc(100% - 60px)", overflowY: "auto",
+      });
+      noDrag(settingsPanel);
+      settingsPanel.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
       root.appendChild(settingsPanel);
 
+      function settingsHead(t) {
+        const d = cap(t); d.style.margin = "8px 0 4px"; d.style.color = "#8a8a8a";
+        return d;
+      }
       function settingsRow(text, control) {
-        const r = el("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", margin: "5px 0" });
-        r.appendChild(el("div", { fontSize: "11px", color: C.dim, flex: "1" }, { textContent: text }));
+        const r = mk("div", { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", margin: "3px 0" });
+        r.appendChild(tx(mk("div", { fontSize: "11px", color: C.muted, flex: "1" }), text));
         control.style.width = "130px";
         r.appendChild(control);
         return r;
       }
-      settingsPanel.appendChild(el("div", { fontWeight: "700", fontSize: "12px", margin: "4px 0 2px" }, { textContent: "Pass 1 · base" }));
-      settingsPanel.appendChild(settingsRow("Steps", numInput(S.p1.steps, { min: 1, max: 100, width: "130px" }, v => { S.p1.steps = v; S.p1.endStep = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("CFG", numInput(S.p1.cfg, { min: 0, max: 30, step: 0.1, width: "130px" }, v => { S.p1.cfg = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Sampler", styledSelect(SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Scheduler", styledSelect(SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); })));
-      settingsPanel.appendChild(el("div", { fontWeight: "700", fontSize: "12px", margin: "10px 0 2px" }, { textContent: "Pass 2 · hi-res refine" }));
-      settingsPanel.appendChild(settingsRow("Steps", numInput(S.p2.steps, { min: 1, max: 100, width: "130px" }, v => { S.p2.steps = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("CFG", numInput(S.p2.cfg, { min: 0, max: 30, step: 0.1, width: "130px" }, v => { S.p2.cfg = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Sampler", styledSelect(SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Scheduler", styledSelect(SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Start at step", numInput(S.p2.startStep, { min: 0, max: 100, width: "130px" }, v => { S.p2.startStep = v; persist(); })));
-      settingsPanel.appendChild(el("div", { fontWeight: "700", fontSize: "12px", margin: "10px 0 2px" }, { textContent: "Upscale (latent)" }));
-      settingsPanel.appendChild(settingsRow("Method", styledSelect(UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); })));
-      settingsPanel.appendChild(settingsRow("Factor", numInput(S.upscaleBy, { min: 1, max: 4, step: 0.05, width: "130px" }, v => { S.upscaleBy = v; persist(); })));
+      settingsPanel.appendChild(settingsHead("Pass 1 · base"));
+      settingsPanel.appendChild(settingsRow("Steps", NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); }, "130px")));
+      settingsPanel.appendChild(settingsRow("CFG", NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); }, "130px")));
+      settingsPanel.appendChild(settingsRow("Sampler", DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); })));
+      settingsPanel.appendChild(settingsRow("Scheduler", DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); })));
+      settingsPanel.appendChild(settingsHead("Pass 2 · hi-res refine"));
+      settingsPanel.appendChild(settingsRow("Steps", NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); }, "130px")));
+      settingsPanel.appendChild(settingsRow("CFG", NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); }, "130px")));
+      settingsPanel.appendChild(settingsRow("Sampler", DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); })));
+      settingsPanel.appendChild(settingsRow("Scheduler", DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); })));
+      settingsPanel.appendChild(settingsRow("Start at step", NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); }, "130px")));
+      settingsPanel.appendChild(settingsHead("Upscale (latent)"));
+      settingsPanel.appendChild(settingsRow("Method", DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); })));
+      settingsPanel.appendChild(settingsRow("Factor", NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); }, "130px")));
+      settingsPanel.appendChild(settingsHead("Output"));
+      const autoSaveBtn = mk("button", {
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
+        height: "26px", padding: "0 10px", cursor: "pointer", fontSize: "11px",
+        color: C.text, outline: "none", transition: "all .15s", width: "130px",
+      });
+      autoSaveBtn.onclick = (e) => { e.stopPropagation(); S.autoSave = !S.autoSave; persist(); syncAutoSave(); };
+      function syncAutoSave() {
+        tx(autoSaveBtn, S.autoSave ? "On" : "Off");
+        autoSaveBtn.style.borderColor = S.autoSave ? LIME : C.border;
+        autoSaveBtn.style.color = S.autoSave ? LIME : C.muted;
+      }
+      syncAutoSave();
+      settingsPanel.appendChild(settingsRow("Auto-save", noDrag(autoSaveBtn)));
+      const openFolderBtn = mk("button", {
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
+        height: "26px", padding: "0 10px", cursor: "pointer", fontSize: "11px",
+        color: C.text, outline: "none", width: "130px",
+      });
+      tx(openFolderBtn, "Open folder");
+      openFolderBtn.onclick = (e) => {
+        e.stopPropagation();
+        api.fetchApi("/krea2_onenode/open_folder", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(S._lastImage?.type === "output" ? S._lastImage : {}),
+        }).catch(() => {});
+      };
+      settingsPanel.appendChild(settingsRow("Output folder", noDrag(openFolderBtn)));
+
+      syncSize();
 
       // ── image display helpers ──────────────────────────────────────────────
       function viewUrl(img) {
@@ -558,7 +831,7 @@ app.registerExtension({
         previewImg.src = viewUrl(img);
         previewImg.style.display = "";
         previewEmpty.style.display = "none";
-        saveBtn.style.opacity = img.type === "temp" ? "1" : "0.4";
+        saveChip.style.display = img.type === "temp" ? "" : "none";
         pushOutput(img);
       }
       function showBatch(images) {
@@ -566,17 +839,15 @@ app.registerExtension({
         if (images.length <= 1) { thumbStrip.style.display = "none"; return; }
         thumbStrip.style.display = "flex";
         images.forEach((img) => {
-          const t = el("img", {
-            height: "56px", borderRadius: "6px", cursor: "pointer",
-            border: `1px solid ${C.line}`,
+          const t = mk("img", {
+            height: "52px", borderRadius: "6px", cursor: "pointer",
+            border: `1px solid ${C.borderH}`,
           }, { src: viewUrl(img) });
-          t.addEventListener("pointerdown", (e) => e.stopPropagation());
           t.addEventListener("click", (e) => { e.stopPropagation(); showImage(img); });
-          thumbStrip.appendChild(t);
+          thumbStrip.appendChild(noDrag(t));
         });
       }
       function showPreviewBlob(blob) {
-        // live b_preview stream during sampling
         try {
           const url = URL.createObjectURL(blob);
           const old = previewImg.dataset.blobUrl;
@@ -588,7 +859,6 @@ app.registerExtension({
         } catch (e) {}
       }
       function pushOutput(img) {
-        // let the Python placeholder replay this image on its IMAGE output
         const nodeId = (window.__krea2_nodes && Object.entries(window.__krea2_nodes).find(([, v]) => v.S === S)?.[0]) ?? self.id;
         api.fetchApi("/krea2_onenode/set_output", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -632,7 +902,6 @@ app.registerExtension({
           li++;
         }
 
-        // settings gear
         p["K2:sampler1"].inputs.steps = S.p1.steps;
         p["K2:sampler1"].inputs.cfg = S.p1.cfg;
         p["K2:sampler1"].inputs.sampler_name = S.p1.sampler;
@@ -659,10 +928,13 @@ app.registerExtension({
 
       async function doGenerate() {
         if (S._generating) return;
-        if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.danger); return; }
+        if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
         S._generating = true;
-        genBtn.textContent = "Generating…";
-        genBtn.style.opacity = "0.6";
+        tx(genBtn, "Generating…");
+        genBtn.appendChild(genSweep);
+        genBtn.style.background = C.bg3;
+        genBtn.style.color = C.muted;
+        syncStop(true);
         setStatus("Queued…");
         persist();
         try {
@@ -683,19 +955,22 @@ app.registerExtension({
           setStatus("Running…");
         } catch (e) {
           finishGenerate();
-          setStatus(`Error: ${e.message}`, C.danger);
+          setStatus(`Error: ${e.message}`, C.err);
           console.error("[Krea2OneNode] submit failed:", e);
         }
       }
       function finishGenerate() {
         S._generating = false;
-        genBtn.textContent = "Generate";
-        genBtn.style.opacity = "1";
+        tx(genBtn, "Generate");
+        genBtn.appendChild(genSweep);
+        genBtn.style.background = LIME;
+        genBtn.style.color = "#111";
+        syncStop(false);
       }
 
       async function doSaveTemp() {
         const img = S._lastImage;
-        if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save.", C.faint); return; }
+        if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save."); return; }
         try {
           const r = await api.fetchApi("/krea2_onenode/save_temp", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -704,15 +979,14 @@ app.registerExtension({
           const d = await r.json();
           if (d.ok) {
             S._lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
-            saveBtn.style.opacity = "0.4";
+            saveChip.style.display = "none";
             setStatus(`Saved as ${d.filename}`, C.ok);
-          } else setStatus(`Save failed: ${d.error}`, C.danger);
-        } catch (e) { setStatus(`Save failed: ${e.message}`, C.danger); }
+          } else setStatus(`Save failed: ${d.error}`, C.err);
+        } catch (e) { setStatus(`Save failed: ${e.message}`, C.err); }
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
       window.__krea2_nodes[this.id] = { root, S, currentNode: this };
-      // this.id is -1 during onNodeCreated; re-key the cache under the real id next frame.
       requestAnimationFrame(() => {
         const staleKey = -1;
         if (window.__krea2_nodes[staleKey] && self.id !== staleKey) {
