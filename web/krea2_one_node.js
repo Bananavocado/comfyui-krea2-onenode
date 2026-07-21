@@ -400,7 +400,7 @@ app.registerExtension({
       // getMinHeight as fixed — it does not stretch DOM widgets for us).
       const slotH0 = (LiteGraph.NODE_SLOT_HEIGHT || 20);
       const rowsOf = () => Math.max((self.inputs || []).length, (self.outputs || []).length);
-      const innerH = () => Math.max(360, self.size[1] - rowsOf() * slotH0 - 8);
+      const innerH = () => Math.max(360, self.size[1] - rowsOf() * slotH0 - 18);
       this.addDOMWidget("k2_ui", "div", root, {
         getValue() { return null; }, setValue() {}, serialize: false,
         // classic mode: canvasOnly stops the Parameters side-panel stealing the widget;
@@ -439,6 +439,15 @@ app.registerExtension({
       const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
       this.size[0] = Math.max(this.size[0], MIN_W);
       this.size[1] = Math.max(this.size[1], MIN_H + rows * slotH);
+    };
+    // LiteGraph clamps a node to computeSize() while dragging the resize
+    // corner. The default derives it from widget heights — but our widget's
+    // height tracks the node height, which feeds back and auto-grows the node
+    // (~10px per frame while held). Return a static minimum instead.
+    nodeType.prototype.computeSize = function () {
+      const slotH = (LiteGraph.NODE_SLOT_HEIGHT || 20);
+      const rows = Math.max((this.inputs || []).length, (this.outputs || []).length);
+      return [MIN_W, MIN_H + rows * slotH];
     };
     nodeType.prototype.onDrawConnections = function () {};
     nodeType.prototype.getSlotMenuOptions = function () { return []; };
