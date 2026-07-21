@@ -63,7 +63,9 @@ PromptServer.instance.routes.get("/krea2_onenode/workflow_generate")(
 @PromptServer.instance.routes.get("/krea2_onenode/models")
 async def get_models(request):
     try:
-        loras = folder_paths.get_filename_list("loras")
+        # Filter macOS AppleDouble/dot files that leak in from external volumes.
+        loras = [f for f in folder_paths.get_filename_list("loras")
+                 if not os.path.basename(f).startswith(".")]
     except Exception:
         loras = []
     return web.json_response({"loras": loras})
