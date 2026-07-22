@@ -476,7 +476,23 @@ app.registerExtension({
         fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", fontSize: "12px",
         borderRadius: "8px", overflow: "hidden", position: "relative", userSelect: "none",
       });
-      root.addEventListener("wheel", (e) => e.stopPropagation(), { passive: false });
+      // Forward wheel events to the graph canvas so scroll-to-zoom works over
+      // the node (same as the original — the canvas is a sibling of the DOM
+      // widget, so bubbling alone never reaches it). Scrollable child areas
+      // stop propagation first when they actually have content to scroll.
+      root.addEventListener("wheel", (e) => {
+        const cv = app.canvas?.canvas;
+        if (cv) cv.dispatchEvent(new WheelEvent("wheel", {
+          deltaY: e.deltaY, deltaX: e.deltaX,
+          clientX: e.clientX, clientY: e.clientY,
+          ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+          bubbles: true, cancelable: true,
+        }));
+        e.preventDefault();
+      }, { passive: false });
+      const scrollGuard = (el, horizontal) => el.addEventListener("wheel", (e) => {
+        if (horizontal ? el.scrollWidth > el.clientWidth + 2 : el.scrollHeight > el.clientHeight + 2) e.stopPropagation();
+      }, { passive: true });
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
@@ -513,7 +529,7 @@ app.registerExtension({
         width: "300px", flexShrink: "0", minHeight: "0", overflowY: "auto", overflowX: "hidden",
         display: "flex", flexDirection: "column",
       });
-      left.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      scrollGuard(left);
       mainRow.appendChild(left);
 
       // SIZE — dropdown of "W × H" + Custom…, like the original
@@ -763,7 +779,7 @@ app.registerExtension({
         display: "none", gap: "6px", overflowX: "auto", zIndex: "5",
         padding: "4px", background: "rgba(10,10,10,.6)", borderRadius: "8px",
       });
-      thumbStrip.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      scrollGuard(thumbStrip, true);
       right.appendChild(thumbStrip);
 
       // ── PROMPT ─────────────────────────────────────────────────────────────
@@ -775,21 +791,31 @@ app.registerExtension({
       promptHdr.append(promptCap, loraBtn);
       promptWrap.appendChild(promptHdr);
 
+      const TA_MIN = 64, TA_MAX = 240;
       const promptTA = mk("textarea", {
-        width: "100%", height: "64px", resize: "none",
+        width: "100%", height: TA_MIN + "px", resize: "none",
         background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "8px",
         color: C.text, fontSize: "12px", padding: "9px 12px",
         boxSizing: "border-box", outline: "none", lineHeight: "1.55",
         fontFamily: "inherit", transition: "border-color .15s", display: "block",
+        overflowY: "hidden",
       }, { placeholder: "Describe what you want to generate…", spellcheck: false });
       promptTA.value = S.prompt;
+      // Auto-grow with the text (up to a cap, then scroll) instead of clipping.
+      const taGrow = () => {
+        promptTA.style.height = "auto";
+        const h = Math.min(Math.max(TA_MIN, promptTA.scrollHeight), TA_MAX);
+        promptTA.style.height = h + "px";
+        promptTA.style.overflowY = promptTA.scrollHeight > TA_MAX ? "auto" : "hidden";
+      };
       promptTA.onfocus = () => promptTA.style.borderColor = LIME;
       promptTA.onblur = () => promptTA.style.borderColor = C.border;
-      promptTA.oninput = () => { S.prompt = promptTA.value; persist(); };
+      promptTA.oninput = () => { S.prompt = promptTA.value; persist(); taGrow(); };
       promptTA.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); promptTA.blur(); } });
-      promptTA.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      scrollGuard(promptTA);
       noDrag(promptTA);
       promptWrap.appendChild(promptTA);
+      requestAnimationFrame(taGrow);
       root.appendChild(promptWrap);
 
       const statusLine = mk("div", {
