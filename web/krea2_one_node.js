@@ -336,7 +336,12 @@ function _active() { return window.__krea2_active || null; }
 function _isOurs(evt) {
   const a = _active();
   const pid = evt?.detail?.prompt_id;
-  return a && a.S._promptId && pid === a.S._promptId;
+  return !!(a && pid && (pid === a.S._promptId || a.S._scene?.jobs?.has(pid)));
+}
+// Scene job for this event, or null when it's a single T2I run.
+function _sceneJob(evt) {
+  const a = _active();
+  return a?.S?._scene?.jobs?.get(evt?.detail?.prompt_id) || null;
 }
 if (!window.__krea2_listeners) {
   window.__krea2_listeners = true;
@@ -350,7 +355,9 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
-    if (d?.max) a.setStatus(`Sampling ${d.value}/${d.max}`);
+    const job = _sceneJob(evt);
+    if (job && job.status !== "running") { job.status = "running"; a.sceneRowUpdate?.(job.idx, "running"); }
+    if (d?.max) a.setStatus(job ? `Scene ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
   });
 
   api.addEventListener("executed", (evt) => {
@@ -365,6 +372,21 @@ if (!window.__krea2_listeners) {
   api.addEventListener("execution_success", (evt) => {
     if (!_isOurs(evt)) return;
     const a = _active();
+    const job = _sceneJob(evt);
+    if (job) {
+      const sc = a.S._scene;
+      job.status = "done"; sc.done++;
+      a.sceneRowUpdate?.(job.idx, "done");
+      if (sc.done >= sc.total) {
+        a.setStatus(`Scene complete — ${sc.total} prompt${sc.total > 1 ? "s" : ""} done.`, C.ok);
+        if (a.S.soundOn) playDone();  // single chime at scene end
+        a.S._scene = null;
+        a.done();
+      } else {
+        a.setStatus(`Scene ${sc.done}/${sc.total} complete.`);
+      }
+      return;
+    }
     a.setStatus("Done.", C.ok);
     if (a.S.soundOn) playDone();
     a.done();
@@ -375,6 +397,17 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
+    const job = _sceneJob(evt);
+    if (job) {
+      // One failed row must not end the scene — the rest of the server queue
+      // keeps executing. End only once every job is accounted for.
+      const sc = a.S._scene;
+      job.status = "error"; sc.done++;
+      a.sceneRowUpdate?.(job.idx, "error");
+      a.setStatus(`Scene ${job.seq}/${sc.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
+      if (sc.done >= sc.total) { a.S._scene = null; a.done(); }
+      return;
+    }
     a.setStatus(`Error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 140)}`, C.err);
     a.done();
     a.S._promptId = null;
@@ -383,6 +416,14 @@ if (!window.__krea2_listeners) {
   api.addEventListener("execution_interrupted", (evt) => {
     if (!_isOurs(evt)) return;
     const a = _active();
+    if (a.S._scene) {
+      // Stop already cleared the pending queue server-side; tear down locally.
+      // (If Stop tore down first, _isOurs is already false — idempotent.)
+      a.S._scene = null;
+      a.setStatus("Scene stopped.");
+      a.done();
+      return;
+    }
     a.setStatus("Interrupted.");
     a.done();
     a.S._promptId = null;
@@ -509,10 +550,24 @@ app.registerExtension({
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
+      let pillT2I, pillScene;
       for (const m of MODES) {
-        const p = Pill(m, m === "T2I", () => {}, m !== "T2I");
+        const p = Pill(m, m === "T2I" && S.tab !== "scene", m === "T2I" ? () => setTab("t2i") : () => {}, m !== "T2I");
         if (m !== "T2I") p.title = `${m} — coming in a later phase`;
         toolbar.appendChild(p);
+        if (m === "T2I") {
+          pillT2I = p;
+          pillScene = Pill("SCENE", S.tab === "scene", () => setTab("scene"), false);
+          pillScene.title = "Scene — queue multiple prompts in one run";
+          toolbar.appendChild(pillScene);
+        }
+      }
+      // Pill() bakes active styling at creation; tab switches restyle in place.
+      function setPillActive(p, active) {
+        p.style.background = active ? LIME : C.bg2;
+        p.style.color = active ? "#111" : C.text;
+        p.style.border = `1px solid ${active ? LIME : C.border}`;
+        p.style.fontWeight = active ? "700" : "400";
       }
       toolbar.appendChild(mk("div", { flex: "1" }));
 
@@ -703,6 +758,25 @@ app.registerExtension({
       // spacer then Generate pinned to bottom
       left.appendChild(mk("div", { flex: "1", minHeight: "10px" }));
 
+      // Scene time estimate (scene tab only) — sits just above the Generate row.
+      const estimateLine = mk("div", {
+        display: "none", fontSize: "10px", fontWeight: "700",
+        color: "rgba(240,255,65,.55)", marginBottom: "6px", whiteSpace: "nowrap",
+        overflow: "hidden", textOverflow: "ellipsis", flexShrink: "0",
+      });
+      left.appendChild(estimateLine);
+      function sceneImageCount() {
+        return S.sceneRows.reduce((n, r) => n + (r.prompt.trim() ? r.batch : 0), 0);
+      }
+      function fmtEst(mins) {
+        if (mins >= 60) return `~${Math.floor(mins / 60)}h ${Math.round(mins % 60)}m`;
+        return `~${Math.round(mins)}m`;
+      }
+      function updateEstimate() {
+        const n = sceneImageCount();
+        tx(estimateLine, n ? `${n} image${n > 1 ? "s" : ""} · ${fmtEst(n * PER_IMAGE_MIN)}` : "No prompts yet");
+      }
+
       const genRow = mk("div", { display: "flex", gap: "0", alignItems: "stretch", width: "100%", boxSizing: "border-box", flexShrink: "0" });
       const genBtn = mk("button", {
         background: LIME, color: "#111", border: "2px solid transparent", borderRadius: "8px",
@@ -724,7 +798,7 @@ app.registerExtension({
           genSweep.style.animation = "k2-light-sweep 1s ease forwards";
         }
       };
-      genBtn.addEventListener("click", (e) => { e.stopPropagation(); doGenerate(); });
+      genBtn.addEventListener("click", (e) => { e.stopPropagation(); S.tab === "scene" ? doRunScene() : doGenerate(); });
       noDrag(genBtn);
 
       const stopBtn = mk("button", {
@@ -739,6 +813,24 @@ app.registerExtension({
       stopBtn.onmouseleave = () => { stopBtn.style.borderColor = C.border; stopBtn.style.color = C.muted; };
       stopBtn.onclick = async (e) => {
         e.stopPropagation();
+        if (S._scene) {
+          // Clear pending FIRST so the interrupt can't let the next queued job
+          // start before the clear lands. NOTE: {clear:true} empties ALL
+          // pending items in ComfyUI's server queue, not just this scene's.
+          try {
+            await api.fetchApi("/queue", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ clear: true }),
+            });
+          } catch (err) {}
+          try { await api.fetchApi("/interrupt", { method: "POST" }); } catch (err) {}
+          // execution_interrupted never fires if we stopped between jobs —
+          // tear down locally instead of waiting for it.
+          S._scene = null;
+          finishGenerate();
+          setStatus("Scene stopped; queue cleared.");
+          return;
+        }
         try { await api.fetchApi("/interrupt", { method: "POST" }); } catch (err) {}
       };
       noDrag(stopBtn);
@@ -753,6 +845,148 @@ app.registerExtension({
       }
       genRow.append(genBtn, stopBtn);
       left.appendChild(genRow);
+
+      // ── scene column (SCENE tab): multi-prompt queue ───────────────────────
+      const sceneCol = mk("div", {
+        width: "300px", flexShrink: "0", minHeight: "0",
+        display: "none", flexDirection: "column",
+      });
+      sceneCol.appendChild(cap("Scene prompts"));
+      const sceneRowsEl = mk("div", {
+        display: "flex", flexDirection: "column", gap: "8px",
+        overflowY: "auto", overflowX: "hidden", flex: "1", minHeight: "0", paddingRight: "2px",
+      });
+      scrollGuard(sceneRowsEl);
+      sceneCol.appendChild(sceneRowsEl);
+      const sceneAddBtn = LimeChip("Add prompt", () => {
+        if (S._scene) return;
+        S.sceneRows.push({ prompt: "", batch: 1 });
+        persist(); renderSceneRows(); updateEstimate();
+      });
+      sceneAddBtn.style.alignSelf = "flex-start";
+      sceneAddBtn.style.marginTop = "8px";
+      sceneCol.appendChild(sceneAddBtn);
+      mainRow.appendChild(sceneCol);
+
+      // Per-row status dots. Rebuilt with the rows; structural edits are locked
+      // while a scene runs, so indices stay valid for the whole run.
+      const SCENE_TA_MIN = 40, SCENE_TA_MAX = 160;
+      let _sceneDots = [];
+      function sceneDotSet(dot, status) {
+        const m = {
+          idle:    { t: String((dot._idx ?? 0) + 1), c: C.muted, title: "" },
+          queued:  { t: "○", c: C.muted, title: "Queued" },
+          running: { t: "●", c: LIME,    title: "Running" },
+          done:    { t: "●", c: C.ok,    title: "Done" },
+          error:   { t: "●", c: C.err,   title: "Error" },
+        }[status] || { t: String((dot._idx ?? 0) + 1), c: C.muted, title: "" };
+        tx(dot, m.t); dot.style.color = m.c; dot.title = m.title;
+      }
+      function sceneRowUpdate(idx, status) {
+        const dot = _sceneDots[idx];
+        if (dot) sceneDotSet(dot, status);
+      }
+      // Structural edits (add/remove/batch) are disabled during a run so the
+      // row list can't drift out of sync with the submitted job snapshot;
+      // textareas stay editable (prompts are snapshotted at queue time).
+      function syncSceneLock() {
+        const lock = !!S._scene;
+        sceneAddBtn.style.pointerEvents = lock ? "none" : "";
+        sceneAddBtn.style.opacity = lock ? ".4" : "1";
+        sceneRowsEl.querySelectorAll("[data-k2-lock]").forEach(el => {
+          el.style.pointerEvents = lock ? "none" : "";
+          el.style.opacity = lock ? ".4" : "1";
+        });
+      }
+      function renderSceneRows() {
+        sceneRowsEl.replaceChildren();
+        _sceneDots = [];
+        S.sceneRows.forEach((row, idx) => {
+          const r = mk("div", { display: "flex", alignItems: "flex-start", gap: "6px" });
+
+          const dot = mk("div", {
+            fontSize: "9px", fontWeight: "700", width: "12px", flexShrink: "0",
+            marginTop: "9px", textAlign: "center", color: C.muted, userSelect: "none",
+          });
+          dot._idx = idx;
+          sceneDotSet(dot, "idle");
+          _sceneDots.push(dot);
+          r.appendChild(dot);
+
+          const ta = mk("textarea", {
+            flex: "1", minWidth: "0", height: SCENE_TA_MIN + "px", resize: "none",
+            background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "8px",
+            color: C.text, fontSize: "11px", padding: "7px 9px",
+            boxSizing: "border-box", outline: "none", lineHeight: "1.5",
+            fontFamily: "inherit", transition: "border-color .15s", display: "block",
+            overflowY: "hidden",
+          }, { placeholder: `Prompt ${idx + 1}…`, spellcheck: false });
+          ta.value = row.prompt;
+          const grow = () => {
+            ta.style.height = "auto";
+            const h = Math.min(Math.max(SCENE_TA_MIN, ta.scrollHeight), SCENE_TA_MAX);
+            ta.style.height = h + "px";
+            ta.style.overflowY = ta.scrollHeight > SCENE_TA_MAX ? "auto" : "hidden";
+          };
+          ta.onfocus = () => ta.style.borderColor = LIME;
+          ta.onblur = () => ta.style.borderColor = C.border;
+          // Input only mutates state — never re-render here (it would drop focus).
+          ta.oninput = () => { row.prompt = ta.value; persist(); grow(); updateEstimate(); };
+          ta.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); ta.blur(); } });
+          scrollGuard(ta);
+          noDrag(ta);
+          requestAnimationFrame(grow);
+          r.appendChild(ta);
+
+          const bWrap = mk("div", { width: "58px", flexShrink: "0", marginTop: "3px" });
+          bWrap.dataset.k2Lock = "1";
+          bWrap.appendChild(DD(() => SCENE_BATCHES, row.batch,
+            (n) => { row.batch = n; persist(); updateEstimate(); }, (n) => `×${n}`));
+          r.appendChild(bWrap);
+
+          const rm = mk("button", {
+            background: "none", border: "none", cursor: "pointer", padding: "0 2px",
+            color: C.muted, fontSize: "13px", outline: "none", flexShrink: "0", marginTop: "8px",
+          }, { title: "Remove" });
+          rm.dataset.k2Lock = "1";
+          tx(rm, "✕");
+          rm.onmouseenter = () => rm.style.color = C.err;
+          rm.onmouseleave = () => rm.style.color = C.muted;
+          rm.onclick = (e) => {
+            e.stopPropagation();
+            if (S._scene) return;
+            S.sceneRows.splice(idx, 1);
+            if (!S.sceneRows.length) S.sceneRows.push({ prompt: "", batch: 1 });
+            persist(); renderSceneRows(); updateEstimate();
+          };
+          r.appendChild(noDrag(rm));
+
+          sceneRowsEl.appendChild(r);
+        });
+        syncSceneLock();
+      }
+
+      // Tab switching: one shared skeleton, scene swaps the T2I batch control,
+      // prompt bar and Generate label for the prompt-list column + estimate.
+      function syncTab() {
+        const scene = S.tab === "scene";
+        setPillActive(pillT2I, !scene);
+        setPillActive(pillScene, scene);
+        batchCap.style.display = scene ? "none" : "";
+        batchWrap.style.display = scene ? "none" : "";
+        sceneCol.style.display = scene ? "flex" : "none";
+        promptWrap.style.display = scene ? "none" : "";
+        estimateLine.style.display = scene ? "" : "none";
+        if (!S._generating) {
+          tx(genBtn, scene ? "Run Scene" : "Generate");
+          genBtn.appendChild(genSweep);
+        }
+        if (scene) updateEstimate();
+      }
+      function setTab(t) {
+        if (S.tab === t) return;
+        S.tab = t; persist(); syncTab();
+      }
 
       // ---- right: preview ----
       const right = mk("div", {
@@ -1180,11 +1414,89 @@ app.registerExtension({
       }
       function finishGenerate() {
         S._generating = false;
-        tx(genBtn, "Generate");
+        tx(genBtn, S.tab === "scene" ? "Run Scene" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
         genBtn.style.color = "#111";
         syncStop(false);
+        syncSceneLock();
+      }
+
+      // ── scene run: queue every prompt upfront (server-side queue does the
+      // sequencing, so the run survives the frontend sleeping overnight) ─────
+      async function doRunScene() {
+        if (S._generating) return;
+        const rows = S.sceneRows
+          .map((r, i) => ({ prompt: r.prompt.trim(), batch: r.batch, idx: i }))
+          .filter(r => r.prompt);
+        if (!rows.length) { setStatus("Add at least one prompt.", C.err); return; }
+        S._generating = true;
+        tx(genBtn, "Queueing…");
+        genBtn.appendChild(genSweep);
+        genBtn.style.background = C.bg3;
+        genBtn.style.color = C.muted;
+        syncStop(true);
+        setStatus("Queueing scene…");
+        persist();
+        try {
+          const tpl = await getTemplate();
+          S.sceneRows.forEach((_, i) => sceneRowUpdate(i, "idle"));
+          S._scene = { jobs: new Map(), total: rows.length, done: 0 };
+          syncSceneLock();
+          // Register before the first POST — the first job can start emitting
+          // events while later rows are still being queued.
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate, sceneRowUpdate };
+          let lastSeed = null, images = 0, failed = null;
+          for (let si = 0; si < rows.length; si++) {
+            const r = rows[si];
+            const seed = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+            const prompt = buildPrompt(tpl, { promptText: r.prompt, batch: r.batch, seed, forceSave: true });
+            const resp = await api.fetchApi("/prompt", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+            });
+            const result = await resp.json();
+            if (!resp.ok || result.error) {
+              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+              sceneRowUpdate(r.idx, "error");
+              failed = { row: si + 1, msg: nodeErrs || msg };
+              // A /prompt rejection is almost always a shared settings/template
+              // problem — the remaining rows would fail identically. Abort the
+              // loop; already-queued jobs keep running and stay tracked.
+              break;
+            }
+            S._scene.jobs.set(result.prompt_id, { idx: r.idx, seq: si + 1, status: "queued" });
+            sceneRowUpdate(r.idx, "queued");
+            lastSeed = seed;
+            images += r.batch;
+          }
+          if (lastSeed != null) {
+            S.lastSeed = lastSeed;
+            if (S.randomizeSeed) { S.seed = lastSeed; seedIn.value = lastSeed; }
+            syncSeedUI();
+            persist();
+          }
+          if (!S._scene.jobs.size) {
+            S._scene = null;
+            finishGenerate();
+            setStatus(failed ? `Scene failed to queue (row ${failed.row}): ${failed.msg}` : "Scene failed to queue.", C.err);
+            return;
+          }
+          S._scene.total = S._scene.jobs.size;
+          tx(genBtn, "Running scene…");
+          genBtn.appendChild(genSweep);
+          setStatus(failed
+            ? `Scene: ${S._scene.total} queued, row ${failed.row} failed: ${failed.msg}`
+            : `Scene queued — ${S._scene.total} prompt${S._scene.total > 1 ? "s" : ""} · ${images} image${images > 1 ? "s" : ""} · ${fmtEst(images * PER_IMAGE_MIN)}`,
+            failed ? C.warn : C.muted);
+        } catch (e) {
+          S._scene = null;
+          finishGenerate();
+          setStatus(`Error: ${e.message}`, C.err);
+          console.error("[Krea2OneNode] scene submit failed:", e);
+        }
       }
 
       async function doSaveTemp() {
@@ -1205,6 +1517,9 @@ app.registerExtension({
       }
 
       syncSize();
+      renderSceneRows();
+      updateEstimate();
+      syncTab();
 
       // Restore the last result into the preview after a rebuild (page reload,
       // workflow switch that didn't hit the cache) — the image is on disk.
