@@ -38,6 +38,11 @@ const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", 
 const UPSCALE_METHODS = ["bislerp", "nearest-exact", "bilinear", "area", "bicubic"];
 const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
 
+// Scene tab: allowed per-row batch sizes and the rough per-image duration used
+// for the pre-run time estimate (user's machine averages ~2.5 min/image).
+const SCENE_BATCHES = [1, 2, 4, 8];
+const PER_IMAGE_MIN = 2.5;
+
 // ── state ────────────────────────────────────────────────────────────────────
 function defaultState() {
   return {
@@ -59,12 +64,20 @@ function defaultState() {
     p2: { steps: 10, cfg: 0.8, sampler: "dpmpp_2m_sde", scheduler: "sgm_uniform", startStep: 5 },
     upscaleMethod: "bislerp",
     upscaleBy: 1.8,
+    tab: "t2i",                 // "t2i" | "scene"
+    sceneRows: [{ prompt: "", batch: 1 }],
   };
 }
 function loadState() {
   try {
     const s = Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}"));
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
+    if (s.tab !== "scene") s.tab = "t2i";
+    if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
+    s.sceneRows = s.sceneRows.map(r => ({
+      prompt: typeof r?.prompt === "string" ? r.prompt : "",
+      batch: SCENE_BATCHES.includes(r?.batch) ? r.batch : 1,
+    }));
     return s;
   }
   catch (e) { return defaultState(); }
@@ -1071,7 +1084,10 @@ app.registerExtension({
         return _template;
       }
 
-      function buildPrompt(tpl) {
+      // Default opts reproduce the single-run T2I behavior exactly; the Scene
+      // tab overrides prompt/batch/seed per queued row and forces SaveImage.
+      function buildPrompt(tpl, o = {}) {
+        const { promptText = S.prompt, batch = S.batch, seed = null, forceSave = false } = o;
         const p = JSON.parse(JSON.stringify(tpl));
         const d = dims();
 
@@ -1079,16 +1095,20 @@ app.registerExtension({
         p["K2:clip"].inputs.clip_name = S.modelClip;
         p["K2:vae"].inputs.vae_name = S.modelVae;
 
-        p["K2:pos"].inputs.text = S.prompt || "";
+        p["K2:pos"].inputs.text = promptText || "";
         p["K2:latent"].inputs.width = d.w;
         p["K2:latent"].inputs.height = d.h;
-        p["K2:latent"].inputs.batch_size = S.batch;
+        p["K2:latent"].inputs.batch_size = batch;
 
-        if (S.randomizeSeed) S.seed = Math.floor(Math.random() * 1e15);
-        S.lastSeed = S.seed;
-        seedIn.value = S.seed;
-        syncSeedUI();
-        p["K2:seed"].inputs.seed = S.seed;
+        if (seed != null) {
+          p["K2:seed"].inputs.seed = seed;
+        } else {
+          if (S.randomizeSeed) S.seed = Math.floor(Math.random() * 1e15);
+          S.lastSeed = S.seed;
+          seedIn.value = S.seed;
+          syncSeedUI();
+          p["K2:seed"].inputs.seed = S.seed;
+        }
 
         // LoRA stack → Power Lora Loader dynamic inputs
         let li = 1;
@@ -1114,7 +1134,8 @@ app.registerExtension({
         p["K2:upscale"].inputs.scale_by = S.upscaleBy;
 
         // auto-save off → PreviewImage (temp) instead of SaveImage
-        if (!S.autoSave) {
+        // (scene runs pass forceSave — unattended results must land on disk)
+        if (!S.autoSave && !forceSave) {
           p["K2:save"] = {
             inputs: { images: p["K2:save"].inputs.images },
             class_type: "PreviewImage",
