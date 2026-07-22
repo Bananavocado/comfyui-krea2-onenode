@@ -336,12 +336,17 @@ function _active() { return window.__krea2_active || null; }
 function _isOurs(evt) {
   const a = _active();
   const pid = evt?.detail?.prompt_id;
-  return !!(a && pid && (pid === a.S._promptId || a.S._scene?.jobs?.has(pid)));
+  return !!(a && pid && (pid === a.S._promptId || a.S._scene?.jobs?.has(pid) || a.S._batchRun?.jobs?.has(pid)));
 }
 // Scene job for this event, or null when it's a single T2I run.
 function _sceneJob(evt) {
   const a = _active();
   return a?.S?._scene?.jobs?.get(evt?.detail?.prompt_id) || null;
+}
+// Batch job for this event (T2I batch ×N runs as N sequential jobs), or null.
+function _batchJob(evt) {
+  const a = _active();
+  return a?.S?._batchRun?.jobs?.get(evt?.detail?.prompt_id) || null;
 }
 if (!window.__krea2_listeners) {
   window.__krea2_listeners = true;
@@ -355,6 +360,11 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
+    const bjob = _batchJob(evt);
+    if (bjob) {
+      if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · Sampling ${d.value}/${d.max}`);
+      return;
+    }
     const job = _sceneJob(evt);
     if (job && job.status !== "running") { job.status = "running"; a.sceneRowUpdate?.(job.idx, "running"); }
     if (d?.max) a.setStatus(job ? `Scene ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
@@ -365,6 +375,16 @@ if (!window.__krea2_listeners) {
     const a = _active();
     const imgs = evt.detail?.output?.images;
     if (!imgs?.length) return;
+    const bjob = _batchJob(evt);
+    if (bjob) {
+      // Sequential batch: pop the fresh image up immediately, accumulate the
+      // thumb strip across jobs instead of replacing it per job.
+      const br = a.S._batchRun;
+      br.images.push(...imgs);
+      a.showBatch(br.images);
+      a.showImage(imgs[0]);
+      return;
+    }
     a.showBatch(imgs);
     a.showImage(imgs[0]);
   });
@@ -372,6 +392,20 @@ if (!window.__krea2_listeners) {
   api.addEventListener("execution_success", (evt) => {
     if (!_isOurs(evt)) return;
     const a = _active();
+    const bjob = _batchJob(evt);
+    if (bjob) {
+      const br = a.S._batchRun;
+      br.done++;
+      if (br.done >= br.total) {
+        a.setStatus(`Done — ${br.images.length || br.total} images.`, C.ok);
+        if (a.S.soundOn) playDone();  // single chime at batch end
+        a.S._batchRun = null;
+        a.done();
+      } else {
+        a.setStatus(`Image ${br.done}/${br.total} done.`);
+      }
+      return;
+    }
     const job = _sceneJob(evt);
     if (job) {
       const sc = a.S._scene;
@@ -397,6 +431,15 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
+    const bjob = _batchJob(evt);
+    if (bjob) {
+      // One failed image must not end the batch — later jobs keep executing.
+      const br = a.S._batchRun;
+      br.done++;
+      a.setStatus(`Image ${bjob.seq}/${br.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
+      if (br.done >= br.total) { a.S._batchRun = null; a.done(); }
+      return;
+    }
     const job = _sceneJob(evt);
     if (job) {
       // One failed row must not end the scene — the rest of the server queue
@@ -416,6 +459,12 @@ if (!window.__krea2_listeners) {
   api.addEventListener("execution_interrupted", (evt) => {
     if (!_isOurs(evt)) return;
     const a = _active();
+    if (a.S._batchRun) {
+      a.S._batchRun = null;
+      a.setStatus("Batch stopped.");
+      a.done();
+      return;
+    }
     if (a.S._scene) {
       // Stop already cleared the pending queue server-side; tear down locally.
       // (If Stop tore down first, _isOurs is already false — idempotent.)
@@ -813,10 +862,11 @@ app.registerExtension({
       stopBtn.onmouseleave = () => { stopBtn.style.borderColor = C.border; stopBtn.style.color = C.muted; };
       stopBtn.onclick = async (e) => {
         e.stopPropagation();
-        if (S._scene) {
+        if (S._scene || S._batchRun) {
+          const wasScene = !!S._scene;
           // Clear pending FIRST so the interrupt can't let the next queued job
           // start before the clear lands. NOTE: {clear:true} empties ALL
-          // pending items in ComfyUI's server queue, not just this scene's.
+          // pending items in ComfyUI's server queue, not just this run's.
           try {
             await api.fetchApi("/queue", {
               method: "POST", headers: { "Content-Type": "application/json" },
@@ -827,8 +877,9 @@ app.registerExtension({
           // execution_interrupted never fires if we stopped between jobs —
           // tear down locally instead of waiting for it.
           S._scene = null;
+          S._batchRun = null;
           finishGenerate();
-          setStatus("Scene stopped; queue cleared.");
+          setStatus(wasScene ? "Scene stopped; queue cleared." : "Batch stopped; queue cleared.");
           return;
         }
         try { await api.fetchApi("/interrupt", { method: "POST" }); } catch (err) {}
@@ -1006,6 +1057,7 @@ app.registerExtension({
           previewImg.style.display = "none";
           previewEmpty.style.display = "";
           saveChip.style.display = "none";
+          clearChip.style.display = "none";
         }
       };
       right.appendChild(previewImg);
@@ -1014,11 +1066,14 @@ app.registerExtension({
       right.appendChild(previewEmpty);
 
       const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
+      const clearChip = DarkChip("✕ Clear", () => doClearResult());
+      clearChip.style.display = "none";
+      clearChip.title = "Clear the result from this node (files on disk are untouched)";
       const saveChip = DarkChip("Save", () => doSaveTemp());
       saveChip.style.display = "none";
       const useAsChip = DarkChip("Use as…  ▾", null, true);
       useAsChip.title = "Send to I2I / Edit — coming with those modes";
-      overlayTR.append(saveChip, useAsChip);
+      overlayTR.append(clearChip, saveChip, useAsChip);
       right.appendChild(overlayTR);
 
       const thumbStrip = mk("div", {
@@ -1273,6 +1328,7 @@ app.registerExtension({
         previewImg.style.display = "";
         previewEmpty.style.display = "none";
         saveChip.style.display = img.type === "temp" ? "" : "none";
+        clearChip.style.display = "";
         pushOutput(img);
       }
       function showBatch(images) {
@@ -1391,7 +1447,54 @@ app.registerExtension({
         setStatus("Queued…");
         persist();
         try {
-          const prompt = buildPrompt(await getTemplate());
+          const tpl = await getTemplate();
+
+          // Batch ×N runs as N sequential single-image jobs (seed, seed+1, …)
+          // instead of one batched latent: batched sampling degrades quality
+          // on this hardware, and sequential jobs pop each result up as soon
+          // as it finishes instead of at the very end.
+          if (S.batch > 1) {
+            const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+            S.lastSeed = base;
+            if (S.randomizeSeed) { S.seed = base; seedIn.value = base; }
+            syncSeedUI();
+            persist();
+            S._batchRun = { jobs: new Map(), total: S.batch, done: 0, images: [] };
+            // Register before the first POST — the first job can start
+            // emitting events while later jobs are still being queued.
+            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate };
+            let failed = null;
+            for (let i = 0; i < S.batch; i++) {
+              const prompt = buildPrompt(tpl, { batch: 1, seed: base + i });
+              const resp = await api.fetchApi("/prompt", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+              });
+              const result = await resp.json();
+              if (!resp.ok || result.error) {
+                const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+                const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                  .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+                // A /prompt rejection is a shared settings/template problem —
+                // the remaining jobs would fail identically. Abort the loop;
+                // already-queued jobs keep running and stay tracked.
+                failed = { seq: i + 1, msg: nodeErrs || msg };
+                break;
+              }
+              S._batchRun.jobs.set(result.prompt_id, { seq: i + 1 });
+            }
+            if (!S._batchRun.jobs.size) {
+              S._batchRun = null;
+              throw new Error(failed ? failed.msg : "batch failed to queue");
+            }
+            S._batchRun.total = S._batchRun.jobs.size;
+            setStatus(failed
+              ? `Batch: ${S._batchRun.total} queued, image ${failed.seq} failed: ${failed.msg}`
+              : `Batch queued — ${S._batchRun.total} images…`, failed ? C.warn : C.muted);
+            return;
+          }
+
+          const prompt = buildPrompt(tpl);
           const resp = await api.fetchApi("/prompt", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
@@ -1499,6 +1602,23 @@ app.registerExtension({
         }
       }
 
+      function doClearResult() {
+        if (S._generating) { setStatus("Can't clear while generating.", C.err); return; }
+        S.lastImage = null;
+        persist();
+        const old = previewImg.dataset.blobUrl;
+        if (old) { URL.revokeObjectURL(old); delete previewImg.dataset.blobUrl; }
+        previewImg.removeAttribute("src");
+        previewImg.style.display = "none";
+        previewEmpty.style.display = "";
+        saveChip.style.display = "none";
+        clearChip.style.display = "none";
+        thumbStrip.replaceChildren();
+        thumbStrip.style.display = "none";
+        pushOutput({});  // no filename → backend drops the stored replay image
+        setStatus("Result cleared.");
+      }
+
       async function doSaveTemp() {
         const img = S.lastImage;
         if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save."); return; }
@@ -1528,6 +1648,7 @@ app.registerExtension({
         previewImg.style.display = "";
         previewEmpty.style.display = "none";
         saveChip.style.display = S.lastImage.type === "temp" ? "" : "none";
+        clearChip.style.display = "";
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
