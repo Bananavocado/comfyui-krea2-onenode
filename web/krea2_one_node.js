@@ -366,8 +366,13 @@ if (!window.__krea2_listeners) {
       return;
     }
     const job = _sceneJob(evt);
-    if (job && job.status !== "running") { job.status = "running"; a.sceneRowUpdate?.(job.idx, "running"); }
-    if (d?.max) a.setStatus(job ? `Scene ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
+    if (job && job.status !== "running") {
+      job.status = "running";
+      // Don't downgrade a row dot that already went red — a later job of the
+      // same row starting must not repaint it as running.
+      if (!a.S._scene.rows?.get(job.idx)?.error) a.sceneRowUpdate?.(job.idx, "running");
+    }
+    if (d?.max) a.setStatus(job ? `Scene image ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
   });
 
   api.addEventListener("executed", (evt) => {
@@ -410,14 +415,22 @@ if (!window.__krea2_listeners) {
     if (job) {
       const sc = a.S._scene;
       job.status = "done"; sc.done++;
-      a.sceneRowUpdate?.(job.idx, "done");
+      const row = sc.rows?.get(job.idx);
+      if (row) {
+        row.done++;
+        // Row dot goes green only once every one of its images is done
+        // (and none errored — error dots are sticky).
+        if (row.done >= row.total && !row.error) a.sceneRowUpdate?.(job.idx, "done");
+      } else {
+        a.sceneRowUpdate?.(job.idx, "done");
+      }
       if (sc.done >= sc.total) {
-        a.setStatus(`Scene complete — ${sc.total} prompt${sc.total > 1 ? "s" : ""} done.`, C.ok);
+        a.setStatus(`Scene complete — ${sc.total} image${sc.total > 1 ? "s" : ""} done.`, C.ok);
         if (a.S.soundOn) playDone();  // single chime at scene end
         a.S._scene = null;
         a.done();
       } else {
-        a.setStatus(`Scene ${sc.done}/${sc.total} complete.`);
+        a.setStatus(`Scene ${sc.done}/${sc.total} images done.`);
       }
       return;
     }
@@ -442,12 +455,14 @@ if (!window.__krea2_listeners) {
     }
     const job = _sceneJob(evt);
     if (job) {
-      // One failed row must not end the scene — the rest of the server queue
+      // One failed image must not end the scene — the rest of the server queue
       // keeps executing. End only once every job is accounted for.
       const sc = a.S._scene;
       job.status = "error"; sc.done++;
+      const row = sc.rows?.get(job.idx);
+      if (row) { row.done++; row.error = true; }
       a.sceneRowUpdate?.(job.idx, "error");
-      a.setStatus(`Scene ${job.seq}/${sc.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
+      a.setStatus(`Scene image ${job.seq}/${sc.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
       if (sc.done >= sc.total) { a.S._scene = null; a.done(); }
       return;
     }
@@ -1544,36 +1559,47 @@ app.registerExtension({
         try {
           const tpl = await getTemplate();
           S.sceneRows.forEach((_, i) => sceneRowUpdate(i, "idle"));
-          S._scene = { jobs: new Map(), total: rows.length, done: 0 };
+          // Row batch ×N expands into N single-image jobs (seed, seed+1, …) —
+          // same reasoning as the T2I batch: batched latents degrade quality
+          // on MPS, and per-image jobs surface results as they finish.
+          // rows: Map(row idx -> {total, done, error}) drives the row dots.
+          S._scene = { jobs: new Map(), total: 0, done: 0, rows: new Map() };
           syncSceneLock();
           // Register before the first POST — the first job can start emitting
           // events while later rows are still being queued.
           window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate, sceneRowUpdate };
-          let lastSeed = null, images = 0, failed = null;
+          let lastSeed = null, seq = 0, rowsQueued = 0, failed = null;
+          queueLoop:
           for (let si = 0; si < rows.length; si++) {
             const r = rows[si];
-            const seed = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
-            const prompt = buildPrompt(tpl, { promptText: r.prompt, batch: r.batch, seed, forceSave: true });
-            const resp = await api.fetchApi("/prompt", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
-            });
-            const result = await resp.json();
-            if (!resp.ok || result.error) {
-              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
-              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
-                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
-              sceneRowUpdate(r.idx, "error");
-              failed = { row: si + 1, msg: nodeErrs || msg };
-              // A /prompt rejection is almost always a shared settings/template
-              // problem — the remaining rows would fail identically. Abort the
-              // loop; already-queued jobs keep running and stay tracked.
-              break;
+            const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+            let rowQueued = 0;
+            for (let bi = 0; bi < r.batch; bi++) {
+              const prompt = buildPrompt(tpl, { promptText: r.prompt, batch: 1, seed: base + bi, forceSave: true });
+              const resp = await api.fetchApi("/prompt", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+              });
+              const result = await resp.json();
+              if (!resp.ok || result.error) {
+                const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+                const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                  .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+                sceneRowUpdate(r.idx, "error");
+                failed = { row: si + 1, msg: nodeErrs || msg };
+                // A /prompt rejection is almost always a shared settings/template
+                // problem — the remaining jobs would fail identically. Abort;
+                // already-queued jobs keep running and stay tracked.
+                if (rowQueued) S._scene.rows.set(r.idx, { total: rowQueued, done: 0, error: true });
+                break queueLoop;
+              }
+              S._scene.jobs.set(result.prompt_id, { idx: r.idx, seq: ++seq, status: "queued" });
+              rowQueued++;
             }
-            S._scene.jobs.set(result.prompt_id, { idx: r.idx, seq: si + 1, status: "queued" });
+            S._scene.rows.set(r.idx, { total: rowQueued, done: 0, error: false });
             sceneRowUpdate(r.idx, "queued");
-            lastSeed = seed;
-            images += r.batch;
+            rowsQueued++;
+            lastSeed = base;
           }
           if (lastSeed != null) {
             S.lastSeed = lastSeed;
@@ -1588,11 +1614,12 @@ app.registerExtension({
             return;
           }
           S._scene.total = S._scene.jobs.size;
+          const images = S._scene.total;
           tx(genBtn, "Running scene…");
           genBtn.appendChild(genSweep);
           setStatus(failed
-            ? `Scene: ${S._scene.total} queued, row ${failed.row} failed: ${failed.msg}`
-            : `Scene queued — ${S._scene.total} prompt${S._scene.total > 1 ? "s" : ""} · ${images} image${images > 1 ? "s" : ""} · ${fmtEst(images * PER_IMAGE_MIN)}`,
+            ? `Scene: ${images} queued, row ${failed.row} failed: ${failed.msg}`
+            : `Scene queued — ${rowsQueued} prompt${rowsQueued > 1 ? "s" : ""} · ${images} image${images > 1 ? "s" : ""} · ${fmtEst(images * PER_IMAGE_MIN)}`,
             failed ? C.warn : C.muted);
         } catch (e) {
           S._scene = null;
