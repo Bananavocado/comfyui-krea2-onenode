@@ -794,6 +794,20 @@ app.registerExtension({
       syncPostUI();
       left.appendChild(postBox);
 
+      // ── LORAS (inline list in the left column — replaces the old modal) ────
+      const loraBox = mk("div", { display: "flex", flexDirection: "column", gap: "8px", marginTop: "12px" });
+      const loraCap = cap("LoRAs"); loraCap.style.marginBottom = "0";
+      loraBox.appendChild(loraCap);
+      const loraRows = mk("div", { display: "flex", flexDirection: "column", gap: "8px" });
+      loraBox.appendChild(loraRows);
+      const loraAddRow = LimeChip("Add LoRA", () => {
+        S.loras.push({ on: true, name: "", strength: 1.0 });
+        persist(); renderLoraRows();
+      });
+      loraAddRow.style.alignSelf = "flex-start";
+      loraBox.appendChild(loraAddRow);
+      left.appendChild(loraBox);
+
       // ── ADVANCED CONTROL box (indigo, toggled from Settings prefs) ─────────
       const advCap = (t) => tx(mk("span", {
         fontSize: "9px", fontWeight: "700", letterSpacing: ".08em",
@@ -1245,9 +1259,7 @@ app.registerExtension({
       const promptWrap = mk("div", { display: "flex", flexDirection: "column", gap: "5px", flex: "0 0 auto" });
       const promptHdr = mk("div", { display: "flex", alignItems: "center", gap: "5px" });
       const promptCap = cap("Prompt"); promptCap.style.marginBottom = "0";
-      const loraBtn = LimeChip("Add LoRA", () => { loraOverlay.style.display = "flex"; renderLoraRows(); });
-      loraBtn.style.marginLeft = "auto";
-      promptHdr.append(promptCap, loraBtn);
+      promptHdr.append(promptCap);
       promptWrap.appendChild(promptHdr);
 
       const TA_MIN = 64, TA_MAX = 240;
@@ -1284,84 +1296,32 @@ app.registerExtension({
       root.appendChild(statusLine);
       const setStatus = (t, color = C.muted) => { statusLine.textContent = t; statusLine.style.color = color; };
 
-      // ── LoRA overlay ───────────────────────────────────────────────────────
-      const loraOverlay = mk("div", {
-        position: "absolute", inset: "0", zIndex: "250", display: "none",
-        alignItems: "center", justifyContent: "center",
-        padding: "14px", boxSizing: "border-box",
-      });
-      const loraBg = mk("div", { position: "absolute", inset: "0", background: "rgba(0,0,0,.6)" });
-      const loraPanel = mk("div", {
-        position: "relative",
-        background: "linear-gradient(145deg,#111 0%,#0d0d0d 100%)",
-        border: "1px solid rgba(240,255,65,.18)",
-        borderRadius: "16px", padding: "18px 20px 20px", width: "100%", maxWidth: "560px",
-        maxHeight: "100%",
-        boxShadow: "0 20px 60px rgba(0,0,0,.95),inset 0 1px 0 rgba(255,255,255,.04)",
-        display: "flex", flexDirection: "column", gap: "14px", boxSizing: "border-box",
-      });
-      noDrag(loraPanel);
-      const loraHdr = mk("div", { display: "flex", alignItems: "center", gap: "8px" });
-      const loraTitle = mk("div", {
-        fontSize: "12px", fontWeight: "700", color: "#fff", flex: "1",
-        letterSpacing: ".06em", textTransform: "uppercase",
-      });
-      tx(loraTitle, "LoRA");
-      const loraClose = mk("button", {
-        background: "none", border: "none", cursor: "pointer",
-        color: C.muted, fontSize: "16px", lineHeight: "1", padding: "0", outline: "none", flexShrink: "0",
-      });
-      tx(loraClose, "×");
-      loraClose.onmouseenter = () => loraClose.style.color = "#fff";
-      loraClose.onmouseleave = () => loraClose.style.color = C.muted;
-      const closeLora = () => { loraOverlay.style.display = "none"; };
-      loraClose.onclick = closeLora;
-      loraBg.onclick = closeLora;
-      loraHdr.append(loraTitle, loraClose);
-      const loraDivider = mk("div", { width: "100%", height: "1px", background: "rgba(240,255,65,.10)", marginTop: "-6px" });
-      const loraRows = mk("div", { display: "flex", flexDirection: "column", gap: "10px", overflowY: "auto", minHeight: "0" });
-      loraRows.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
-      const loraAddRow = LimeChip("Add LoRA", () => {
-        S.loras.push({ on: true, name: "", strength: 1.0 });
-        persist(); renderLoraRows();
-      });
-      loraAddRow.style.alignSelf = "flex-start";
-      loraPanel.append(loraHdr, loraDivider, loraRows, loraAddRow);
-      loraOverlay.append(loraBg, loraPanel);
-      root.appendChild(loraOverlay);
-
-      function syncLoraBadge() {
-        const n = S.loras.filter(l => l.name && l.on !== false).length;
-        tx(loraBtn._badge, String(n));
-        loraBtn._badge.style.display = n > 0 ? "" : "none";
-        loraBtn.style.borderColor = n > 0 ? LIME : "rgba(240,255,65,.35)";
-      }
-
+      // ── LoRA rows (rendered into the left-column loraBox) ──────────────────
       function renderLoraRows() {
         loraRows.replaceChildren();
         if (!S.loras.length) {
-          loraRows.appendChild(tx(mk("div", { color: C.muted, fontSize: "11px" }), "No LoRAs — base model only."));
+          loraRows.appendChild(tx(mk("div", { color: C.muted, fontSize: "10px" }), "No LoRAs — base model only."));
         }
         S.loras.forEach((row, idx) => {
-          const r = mk("div", { display: "flex", alignItems: "center", gap: "8px", opacity: row.on ? "1" : ".45" });
+          const r = mk("div", { display: "flex", alignItems: "center", gap: "6px", opacity: row.on ? "1" : ".45" });
           const togBtn = mk("button", {
             background: "none", border: "none", cursor: "pointer", padding: "0 2px",
             color: row.on ? LIME : C.muted, fontSize: "13px", outline: "none", flexShrink: "0",
           }, { title: row.on ? "Disable" : "Enable" });
           tx(togBtn, row.on ? "●" : "○");
-          togBtn.onclick = (e) => { e.stopPropagation(); row.on = !row.on; persist(); renderLoraRows(); syncLoraBadge(); };
+          togBtn.onclick = (e) => { e.stopPropagation(); row.on = !row.on; persist(); renderLoraRows(); };
           r.appendChild(noDrag(togBtn));
 
           const dd = DD(
             () => S._models.loras,
             row.name || null,
-            (v) => { row.name = v; persist(); syncLoraBadge(); },
+            (v) => { row.name = v; persist(); },
             (f) => f.replace(/\.safetensors$/i, ""),
           );
           dd.style.flex = "1"; dd.style.minWidth = "0";
           r.appendChild(dd);
 
-          const st = NI(row.strength, -4, 4, 0.05, (v) => { row.strength = isFinite(v) ? v : 1.0; persist(); }, "58px");
+          const st = NI(row.strength, -4, 4, 0.05, (v) => { row.strength = isFinite(v) ? v : 1.0; persist(); }, "48px");
           st.title = "Strength";
           r.appendChild(st);
 
@@ -1372,13 +1332,13 @@ app.registerExtension({
           tx(rm, "✕");
           rm.onmouseenter = () => rm.style.color = C.err;
           rm.onmouseleave = () => rm.style.color = C.muted;
-          rm.onclick = (e) => { e.stopPropagation(); S.loras.splice(idx, 1); persist(); renderLoraRows(); syncLoraBadge(); };
+          rm.onclick = (e) => { e.stopPropagation(); S.loras.splice(idx, 1); persist(); renderLoraRows(); };
           r.appendChild(noDrag(rm));
 
           loraRows.appendChild(r);
         });
       }
-      syncLoraBadge();
+      renderLoraRows();
 
       // ── SETTINGS overlay (models + preferences, like the original) ─────────
       const settingsOverlay = mk("div", {
