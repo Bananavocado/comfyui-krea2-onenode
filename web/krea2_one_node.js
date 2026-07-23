@@ -505,11 +505,21 @@ if (!window.__krea2_listeners) {
     if (!imgs?.length) return;
     const bjob = _batchJob(evt);
     if (bjob) {
-      // Sequential batch: pop the fresh image up immediately, accumulate the
+      // Rolling queue: pop the fresh image up immediately, accumulate the
       // thumb strip across jobs instead of replacing it per job.
       const br = a.S._batchRun;
       br.images.push(...imgs);
       a.showBatch(br.images);
+      a.showImage(imgs[0]);
+      return;
+    }
+    const sjob = _sceneJob(evt);
+    if (sjob) {
+      // Scene: same accumulation — the strip collects every finished image.
+      const sc = a.S._scene;
+      sc.images = sc.images || [];
+      sc.images.push(...imgs);
+      a.showBatch(sc.images);
       a.showImage(imgs[0]);
       return;
     }
@@ -525,12 +535,13 @@ if (!window.__krea2_listeners) {
       const br = a.S._batchRun;
       br.done++;
       if (br.done >= br.total) {
-        a.setStatus(`Done — ${br.images.length || br.total} images.`, C.ok);
-        if (a.S.soundOn) playDone();  // single chime at batch end
+        a.setStatus(`Done — ${br.images.length || br.total} image${br.total > 1 ? "s" : ""}.`, C.ok);
+        if (a.S.soundOn) playDone();  // single chime once the queue drains
         a.S._batchRun = null;
         a.done();
       } else {
         a.setStatus(`Image ${br.done}/${br.total} done.`);
+        a.syncQueueUI?.();
       }
       return;
     }
@@ -569,11 +580,12 @@ if (!window.__krea2_listeners) {
     const d = evt.detail;
     const bjob = _batchJob(evt);
     if (bjob) {
-      // One failed image must not end the batch — later jobs keep executing.
+      // One failed image must not end the queue — later jobs keep executing.
       const br = a.S._batchRun;
       br.done++;
       a.setStatus(`Image ${bjob.seq}/${br.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
       if (br.done >= br.total) { a.S._batchRun = null; a.done(); }
+      else a.syncQueueUI?.();
       return;
     }
     const job = _sceneJob(evt);
@@ -1780,86 +1792,84 @@ app.registerExtension({
         return p;
       }
 
-      async function doGenerate() {
-        if (S._generating) return;
-        if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
-        S._generating = true;
-        timerStart();
-        progShow();
-        tx(genBtn, "Generating…");
+      // ── T2I generate = a rolling queue. The first click starts a queue run
+      // (S._batchRun) and the button becomes "Queue (n)" — NOT disabled: every
+      // further click snapshots the CURRENT prompt/settings via buildPrompt
+      // and appends more jobs to the same run (batch ×N appends N). All jobs
+      // land in ComfyUI's server-side queue; results accumulate in the thumb
+      // strip like a scene run. The run ends when every queued job resolved.
+      function syncQueueUI() {
+        const br = S._batchRun;
+        if (!br) return;
+        const pending = Math.max(0, br.total - br.done);
+        tx(genBtn, `Queue (${pending})`);
         genBtn.appendChild(genSweep);
-        genBtn.style.background = C.bg3;
-        genBtn.style.color = C.muted;
-        syncStop(true);
-        setStatus("Queued…");
-        persist();
+      }
+      async function doGenerate() {
+        if (S._submitting || S._scene) return;
+        if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
+        S._submitting = true;
         try {
           const tpl = await getTemplate(S.tab === "t2iq" ? "quality" : "generate");
-
-          // Batch ×N runs as N sequential single-image jobs (seed, seed+1, …)
-          // instead of one batched latent: batched sampling degrades quality
-          // on this hardware, and sequential jobs pop each result up as soon
-          // as it finishes instead of at the very end.
-          if (S.batch > 1) {
-            const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
-            S.lastSeed = base;
-            if (S.randomizeSeed) { S.seed = base; seedIn.value = base; }
-            syncSeedUI();
-            persist();
-            S._batchRun = { jobs: new Map(), total: S.batch, done: 0, images: [] };
-            // Register before the first POST — the first job can start
-            // emitting events while later jobs are still being queued.
-            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate };
-            let failed = null;
-            for (let i = 0; i < S.batch; i++) {
-              const prompt = buildPrompt(tpl, { batch: 1, seed: base + i });
-              const resp = await api.fetchApi("/prompt", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
-              });
-              const result = await resp.json();
-              if (!resp.ok || result.error) {
-                const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
-                const nodeErrs = result?.node_errors && Object.values(result.node_errors)
-                  .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
-                // A /prompt rejection is a shared settings/template problem —
-                // the remaining jobs would fail identically. Abort the loop;
-                // already-queued jobs keep running and stay tracked.
-                failed = { seq: i + 1, msg: nodeErrs || msg };
-                break;
-              }
-              S._batchRun.jobs.set(result.prompt_id, { seq: i + 1 });
-            }
-            if (!S._batchRun.jobs.size) {
-              S._batchRun = null;
-              throw new Error(failed ? failed.msg : "batch failed to queue");
-            }
-            S._batchRun.total = S._batchRun.jobs.size;
-            setStatus(failed
-              ? `Batch: ${S._batchRun.total} queued, image ${failed.seq} failed: ${failed.msg}`
-              : `Batch queued — ${S._batchRun.total} images…`, failed ? C.warn : C.muted);
-            return;
+          const first = !S._batchRun;
+          if (first) {
+            S._batchRun = { jobs: new Map(), total: 0, done: 0, images: [] };
+            S._generating = true;
+            timerStart();
+            progShow();
+            syncStop(true);
+            setStatus("Queued…");
           }
-
-          const prompt = buildPrompt(tpl);
-          const resp = await api.fetchApi("/prompt", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
-          });
-          const result = await resp.json();
-          if (!resp.ok || result.error) {
-            const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
-            const nodeErrs = result?.node_errors && Object.values(result.node_errors)
-              .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
-            throw new Error(nodeErrs || msg);
+          // (Re-)register before the POSTs — jobs already running keep
+          // emitting events while new ones are queued, and each click
+          // refreshes the progress plan snapshot for the latest settings.
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, syncQueueUI, prog: currentProgPlan(), done: finishGenerate };
+          // Batch ×N queues N single-image jobs (seed, seed+1, …) — batched
+          // latents degrade quality on MPS, and per-image jobs surface
+          // results as they finish.
+          const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+          S.lastSeed = base;
+          if (S.randomizeSeed) { S.seed = base; seedIn.value = base; }
+          syncSeedUI();
+          persist();
+          const br = S._batchRun;
+          let failed = null;
+          for (let i = 0; i < S.batch; i++) {
+            const prompt = buildPrompt(tpl, { batch: 1, seed: base + i });
+            const resp = await api.fetchApi("/prompt", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+            });
+            const result = await resp.json();
+            if (!resp.ok || result.error) {
+              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+              // A /prompt rejection is a settings/template problem — the rest
+              // of this click's jobs would fail identically. Stop this click;
+              // anything already queued keeps running and stays tracked.
+              failed = { msg: nodeErrs || msg };
+              break;
+            }
+            br.jobs.set(result.prompt_id, { seq: br.total + 1 });
+            br.total++;
           }
-          S._promptId = result.prompt_id || null;
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate };
-          setStatus("Running…");
+          if (first && !br.total) {
+            S._batchRun = null;
+            throw new Error(failed ? failed.msg : "failed to queue");
+          }
+          syncQueueUI();
+          const pending = br.total - br.done;
+          setStatus(failed
+            ? `Queue error: ${failed.msg}`
+            : pending > 1 ? `${pending} in queue` : "Running…",
+            failed ? C.warn : C.text);
         } catch (e) {
           finishGenerate();
           setStatus(`Error: ${e.message}`, C.err);
           console.error("[Krea2OneNode] submit failed:", e);
+        } finally {
+          S._submitting = false;
         }
       }
       function finishGenerate() {
