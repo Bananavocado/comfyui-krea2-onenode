@@ -73,7 +73,11 @@ function defaultState() {
     upscaleMethod: "bislerp",
     upscaleBy: 1.8,
     // T2I HQ (quality template): ClownsharK two-pass, same-res refine, no upscale.
-    q: { p1Steps: 8, p1Cfg: 1.0, denoise: 0.2, eta: 0.9, grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true, enhance: 1.5 },
+    q: {
+      p1Steps: 8, p1Cfg: 1.0, p1Sampler: "linear/euler", p1Sched: "simple",
+      denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
+      grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true,
+    },
     tab: "t2i",                 // "t2i" | "t2iq" | "scene"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
@@ -760,6 +764,36 @@ app.registerExtension({
 
       // BATCH
 
+      // ── POST-PROCESSING (T2I HQ tab only) — always visible, deliberately
+      // NOT behind the Advanced pref. Off deletes the node from the submitted
+      // graph (buildPrompt rewires decode → [grain] → [sharpen] → save).
+      const postBox = mk("div", { display: "none", flexDirection: "column", gap: "7px", marginTop: "12px" });
+      const postCap = cap("Post-processing"); postCap.style.marginBottom = "0";
+      postBox.appendChild(postCap);
+      const qGrain = NI(S.q.grain, 0, 1, 0.01, v => { S.q.grain = isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.09; persist(); });
+      const qSharp = NI(S.q.sharpen, 1, 12, 1, v => { S.q.sharpen = Math.min(12, Math.max(1, Math.round(v || 1))); persist(); });
+      const qGrainTog = Toggle(S.q.grainOn !== false, v => { S.q.grainOn = v; persist(); syncPostUI(); });
+      const qSharpTog = Toggle(S.q.sharpenOn !== false, v => { S.q.sharpenOn = v; persist(); syncPostUI(); });
+      function syncPostUI() {
+        qGrain.disabled = S.q.grainOn === false;
+        qGrain.style.opacity = S.q.grainOn === false ? ".4" : "1";
+        qSharp.disabled = S.q.sharpenOn === false;
+        qSharp.style.opacity = S.q.sharpenOn === false ? ".4" : "1";
+      }
+      const postRow = (label, tog, ni) => {
+        const r = mk("div", { display: "grid", gridTemplateColumns: "56px auto 1fr", gap: "8px", alignItems: "center" });
+        r.appendChild(tx(mk("span", {
+          fontSize: "9px", fontWeight: "700", letterSpacing: ".08em",
+          textTransform: "uppercase", color: C.muted,
+        }), label));
+        ni.style.width = "100%"; ni.style.minWidth = "0"; ni.style.boxSizing = "border-box";
+        r.append(tog, ni);
+        return r;
+      };
+      postBox.append(postRow("Grain", qGrainTog, qGrain), postRow("Sharpen", qSharpTog, qSharp));
+      syncPostUI();
+      left.appendChild(postBox);
+
       // ── ADVANCED CONTROL box (indigo, toggled from Settings prefs) ─────────
       const advCap = (t) => tx(mk("span", {
         fontSize: "9px", fontWeight: "700", letterSpacing: ".08em",
@@ -806,11 +840,28 @@ app.registerExtension({
       const p1Sched = DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); });
       advT2I1.appendChild(advGrid(["Sampler", p1Samp], ["Sched", p1Sched]));
 
-      // T2I HQ pass 1
+      // T2I HQ pass 1 — ClownsharK sampler/scheduler option lists come from the
+      // live /object_info (huge RES4LYF list); until the fetch lands the DDs
+      // offer just the template defaults.
+      S._clown = {
+        samplers: ["linear/euler", "exponential/res_2s"],
+        schedulers: ["simple", "bong_tangent"],
+      };
+      api.fetchApi("/object_info/ClownsharKSampler_Beta").then(r => r.json()).then(d => {
+        const req = d?.ClownsharKSampler_Beta?.input?.required || {};
+        const opts = (spec) => !Array.isArray(spec) ? null
+          : Array.isArray(spec[0]) ? spec[0]                  // classic combo: [[...options], cfg]
+          : spec[1]?.options || null;                          // v3 combo: ["COMBO", {options}]
+        S._clown.samplers = opts(req.sampler_name) || S._clown.samplers;
+        S._clown.schedulers = opts(req.scheduler) || S._clown.schedulers;
+      }).catch(() => {});
       advQ1.appendChild(advDivider("Pass 1 · base"));
       const q1Steps = NI(S.q.p1Steps, 1, 100, 1, v => { S.q.p1Steps = Math.max(1, Math.round(v || 8)); persist(); });
       const q1Cfg = NI(S.q.p1Cfg, 0, 30, 0.1, v => { S.q.p1Cfg = isFinite(v) ? v : 1.0; persist(); });
       advQ1.appendChild(advGrid(["Steps", q1Steps], ["CFG", q1Cfg]));
+      const q1Samp = DD(() => S._clown.samplers, S.q.p1Sampler, v => { S.q.p1Sampler = v; persist(); });
+      const q1Sched = DD(() => S._clown.schedulers, S.q.p1Sched, v => { S.q.p1Sched = v; persist(); });
+      advQ1.appendChild(advGrid(["Sampler", q1Samp], ["Sched", q1Sched]));
       advPanel.append(advT2I1, advQ1);
 
       // seed (reference keeps seed in the advanced box)
@@ -866,41 +917,23 @@ app.registerExtension({
       const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); });
       advT2I2.appendChild(advGrid(["Method", upMeth], ["×", upFac]));
 
-      // T2I HQ pass 2 + post (same-res refine; pass-2 steps = ceil(denoise × 8))
+      // T2I HQ pass 2 (same-res refine; steps = ceil(denoise × 8))
       advQ2.appendChild(advDivider("Pass 2 · refine"));
       const q2Den = NI(S.q.denoise, 0.05, 1, 0.05, v => { S.q.denoise = isFinite(v) ? Math.min(1, Math.max(0.05, v)) : 0.2; persist(); });
       const q2Eta = NI(S.q.eta, 0, 2, 0.05, v => { S.q.eta = isFinite(v) ? v : 0.9; persist(); });
-      advQ2.appendChild(advGrid(["Denoise", q2Den], ["Eta", q2Eta]));
-      advQ2.appendChild(advDivider("Post"));
-      const qGrain = NI(S.q.grain, 0, 1, 0.01, v => { S.q.grain = isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.09; persist(); });
-      const qSharp = NI(S.q.sharpen, 1, 12, 1, v => { S.q.sharpen = Math.min(12, Math.max(1, Math.round(v || 1))); persist(); });
-      // On/off toggles: off removes the node from the submitted graph entirely
-      // (chain is rewired in buildPrompt), the value box just dims.
-      const qGrainTog = Toggle(S.q.grainOn !== false, v => { S.q.grainOn = v; persist(); syncPostUI(); });
-      const qSharpTog = Toggle(S.q.sharpenOn !== false, v => { S.q.sharpenOn = v; persist(); syncPostUI(); });
-      const postCtl = (tog, ni) => {
-        const w = mk("div", { display: "flex", alignItems: "center", gap: "6px", minWidth: "0" });
-        ni.style.flex = "1"; ni.style.minWidth = "0"; ni.style.width = "auto";
-        w.append(tog, ni);
-        return w;
-      };
-      function syncPostUI() {
-        qGrain.disabled = S.q.grainOn === false;
-        qGrain.style.opacity = S.q.grainOn === false ? ".4" : "1";
-        qSharp.disabled = S.q.sharpenOn === false;
-        qSharp.style.opacity = S.q.sharpenOn === false ? ".4" : "1";
-      }
-      advQ2.appendChild(advGrid(["Grain", postCtl(qGrainTog, qGrain)], ["Sharpen", postCtl(qSharpTog, qSharp)]));
-      syncPostUI();
-      advQ2.appendChild(advDivider("Enhancer"));
-      const qEnh = NI(S.q.enhance, 0, 2, 0.05, v => { S.q.enhance = isFinite(v) ? Math.min(2, Math.max(0, v)) : 1.5; persist(); });
-      qEnh.title = "Krea2T enhancer strength (0 = off)";
-      advQ2.appendChild(advGrid(["Strength", qEnh]));
+      const q2Cfg = NI(S.q.p2Cfg, 0, 30, 0.1, v => { S.q.p2Cfg = isFinite(v) ? v : 1.0; persist(); });
+      advQ2.appendChild(advGrid(["Denoise", q2Den], ["Eta", q2Eta], ["CFG", q2Cfg]));
+      const q2Samp = DD(() => S._clown.samplers, S.q.p2Sampler, v => { S.q.p2Sampler = v; persist(); });
+      const q2Sched = DD(() => S._clown.schedulers, S.q.p2Sched, v => { S.q.p2Sched = v; persist(); });
+      advQ2.appendChild(advGrid(["Sampler", q2Samp], ["Sched", q2Sched]));
+      // (Krea2T-Enhancer stays at the template default — enabled, strength 1.5 —
+      // with no UI control, per user preference.)
       advPanel.append(advT2I2, advQ2);
 
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
         const q = S.tab === "t2iq";
+        postBox.style.display = q ? "flex" : "none";
         advT2I1.style.display = q ? "none" : "flex";
         advT2I2.style.display = q ? "none" : "flex";
         advQ1.style.display = q ? "flex" : "none";
@@ -1541,13 +1574,17 @@ app.registerExtension({
         if (q) {
           // Quality (ClownsharK): pass 2 refines the pass-1 latent at the same
           // resolution; its step count follows the source workflow's
-          // ceil(denoise × 8) expression.
-          p["K2Q:enh"].inputs.enabled = S.q.enhance > 0;
-          p["K2Q:enh"].inputs.strength = S.q.enhance;
+          // ceil(denoise × 8) expression. Krea2T-Enhancer keeps its template
+          // default (enabled, strength 1.5).
           p["K2Q:sampler1"].inputs.steps = S.q.p1Steps;
           p["K2Q:sampler1"].inputs.cfg = S.q.p1Cfg;
+          p["K2Q:sampler1"].inputs.sampler_name = S.q.p1Sampler;
+          p["K2Q:sampler1"].inputs.scheduler = S.q.p1Sched;
           p["K2Q:sampler2"].inputs.denoise = S.q.denoise;
           p["K2Q:sampler2"].inputs.eta = S.q.eta;
+          p["K2Q:sampler2"].inputs.cfg = S.q.p2Cfg;
+          p["K2Q:sampler2"].inputs.sampler_name = S.q.p2Sampler;
+          p["K2Q:sampler2"].inputs.scheduler = S.q.p2Sched;
           p["K2Q:sampler2"].inputs.steps = Math.max(1, Math.ceil(S.q.denoise * 8));
           // Post toggles: an off node is deleted and the image chain rewired
           // around it (decode → [grain] → [sharpen] → save).
