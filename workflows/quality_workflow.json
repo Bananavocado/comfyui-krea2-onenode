@@ -1,0 +1,149 @@
+{
+  "K2Q:unet": {
+    "inputs": {
+      "unet_name": "krea2_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model" }
+  },
+  "K2Q:enh": {
+    "inputs": {
+      "model": ["K2Q:unet", 0],
+      "enabled": true,
+      "strength": 1.5,
+      "debug": false
+    },
+    "class_type": "ComfyUI-Krea2T-Enhancer",
+    "_meta": { "title": "Krea2T Enhancer" }
+  },
+  "K2Q:lora": {
+    "inputs": {
+      "model": ["K2Q:enh", 0]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": { "title": "LoRA Stack" }
+  },
+  "K2Q:clip": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load CLIP" }
+  },
+  "K2Q:pos": {
+    "inputs": {
+      "text": "",
+      "clip": ["K2Q:clip", 0]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Prompt" }
+  },
+  "K2Q:zero": {
+    "inputs": {
+      "conditioning": ["K2Q:pos", 0]
+    },
+    "class_type": "ConditioningZeroOut",
+    "_meta": { "title": "Zero Negative" }
+  },
+  "K2Q:latent": {
+    "inputs": {
+      "width": 1280,
+      "height": 720,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": { "title": "Empty Latent" }
+  },
+  "K2Q:seed": {
+    "inputs": {
+      "seed": 703028258219895
+    },
+    "class_type": "Seed (rgthree)",
+    "_meta": { "title": "Seed" }
+  },
+  "K2Q:sampler1": {
+    "inputs": {
+      "eta": 0.0,
+      "sampler_name": "linear/euler",
+      "scheduler": "simple",
+      "steps": 8,
+      "steps_to_run": -1,
+      "denoise": 1.0,
+      "cfg": 1.0,
+      "seed": ["K2Q:seed", 0],
+      "sampler_mode": "standard",
+      "bongmath": true,
+      "model": ["K2Q:lora", 0],
+      "positive": ["K2Q:pos", 0],
+      "negative": ["K2Q:zero", 0],
+      "latent_image": ["K2Q:latent", 0]
+    },
+    "class_type": "ClownsharKSampler_Beta",
+    "_meta": { "title": "Sampler Pass 1 (base)" }
+  },
+  "K2Q:sampler2": {
+    "inputs": {
+      "eta": 0.9,
+      "sampler_name": "exponential/res_2s",
+      "scheduler": "bong_tangent",
+      "steps": 2,
+      "steps_to_run": -1,
+      "denoise": 0.2,
+      "cfg": 1.0,
+      "seed": ["K2Q:seed", 0],
+      "sampler_mode": "standard",
+      "bongmath": true,
+      "model": ["K2Q:lora", 0],
+      "positive": ["K2Q:pos", 0],
+      "negative": ["K2Q:zero", 0],
+      "latent_image": ["K2Q:sampler1", 0]
+    },
+    "class_type": "ClownsharKSampler_Beta",
+    "_meta": { "title": "Sampler Pass 2 (same-res refine)" }
+  },
+  "K2Q:vae": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
+  },
+  "K2Q:decode": {
+    "inputs": {
+      "samples": ["K2Q:sampler2", 1],
+      "vae": ["K2Q:vae", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode (denoised)" }
+  },
+  "K2Q:grain": {
+    "inputs": {
+      "image": ["K2Q:decode", 0],
+      "grain_power": 0.09,
+      "grain_scale": 1.0,
+      "grain_sat": 1.0
+    },
+    "class_type": "LayerFilter: AddGrain",
+    "_meta": { "title": "Add Grain" }
+  },
+  "K2Q:sharp": {
+    "inputs": {
+      "images": ["K2Q:grain", 0],
+      "iterations": 1,
+      "kernel_size": 3
+    },
+    "class_type": "Image Lucy Sharpen",
+    "_meta": { "title": "Lucy Sharpen" }
+  },
+  "K2Q:save": {
+    "inputs": {
+      "filename_prefix": "krea2-onenode/Krea2",
+      "images": ["K2Q:sharp", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save Image" }
+  }
+}

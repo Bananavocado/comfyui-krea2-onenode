@@ -72,7 +72,9 @@ function defaultState() {
     p2: { steps: 10, cfg: 0.8, sampler: "dpmpp_2m_sde", scheduler: "sgm_uniform", startStep: 5 },
     upscaleMethod: "bislerp",
     upscaleBy: 1.8,
-    tab: "t2i",                 // "t2i" | "scene"
+    // T2I HQ (quality template): ClownsharK two-pass, same-res refine, no upscale.
+    q: { p1Steps: 8, p1Cfg: 1.0, denoise: 0.2, eta: 0.9, grain: 0.09, sharpen: 1, enhance: 1.5 },
+    tab: "t2i",                 // "t2i" | "t2iq" | "scene"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
 }
@@ -87,7 +89,8 @@ function loadState() {
       }
     }
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
-    if (s.tab !== "scene") s.tab = "t2i";
+    s.q = Object.assign(defaultState().q, s.q || {});
+    if (s.tab !== "scene" && s.tab !== "t2iq") s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
       prompt: typeof r?.prompt === "string" ? r.prompt : "",
@@ -629,13 +632,16 @@ app.registerExtension({
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
-      let pillT2I, pillScene;
+      let pillT2I, pillQ, pillScene;
       for (const m of MODES) {
-        const p = Pill(m, m === "T2I" && S.tab !== "scene", m === "T2I" ? () => setTab("t2i") : () => {}, m !== "T2I");
+        const p = Pill(m, m === "T2I" && S.tab === "t2i", m === "T2I" ? () => setTab("t2i") : () => {}, m !== "T2I");
         if (m !== "T2I") p.title = `${m} — coming in a later phase`;
         toolbar.appendChild(p);
         if (m === "T2I") {
           pillT2I = p;
+          pillQ = Pill("T2I HQ", S.tab === "t2iq", () => setTab("t2iq"), false);
+          pillQ.title = "Quality T2I — ClownsharK two-pass + grain/sharpen (slower, no upscale)";
+          toolbar.appendChild(pillQ);
           pillScene = Pill("SCENE", S.tab === "scene", () => setTab("scene"), false);
           pillScene.title = "Scene — queue multiple prompts in one run";
           toolbar.appendChild(pillScene);
@@ -746,7 +752,10 @@ app.registerExtension({
         orientBtn.style.opacity = sq ? ".35" : "1";
         orientBtn.style.cursor = sq ? "default" : "pointer";
         tx(orientBtn, d.w >= d.h ? "▭" : "▯");
-        tx(finalTxt, `${d.w}×${d.h} → ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
+        // HQ template refines at the same resolution — no latent upscale.
+        tx(finalTxt, S.tab === "t2iq"
+          ? `${d.w}×${d.h} (no upscale)`
+          : `${d.w}×${d.h} → ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
       }
 
       // BATCH
@@ -783,14 +792,26 @@ app.registerExtension({
         return d;
       };
 
+      // Per-mode sections: T2I (KSampler two-pass + upscale) vs T2I HQ
+      // (ClownsharK same-res refine). Seed row is shared between the two.
+      const advSec = () => mk("div", { display: "flex", flexDirection: "column", gap: "8px" });
+      const advT2I1 = advSec(), advT2I2 = advSec(), advQ1 = advSec(), advQ2 = advSec();
+
       // pass 1
-      advPanel.appendChild(advDivider("Pass 1 · base"));
+      advT2I1.appendChild(advDivider("Pass 1 · base"));
       const p1Steps = NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); });
       const p1Cfg = NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); });
-      advPanel.appendChild(advGrid(["Steps", p1Steps], ["CFG", p1Cfg]));
+      advT2I1.appendChild(advGrid(["Steps", p1Steps], ["CFG", p1Cfg]));
       const p1Samp = DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); });
       const p1Sched = DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); });
-      advPanel.appendChild(advGrid(["Sampler", p1Samp], ["Sched", p1Sched]));
+      advT2I1.appendChild(advGrid(["Sampler", p1Samp], ["Sched", p1Sched]));
+
+      // T2I HQ pass 1
+      advQ1.appendChild(advDivider("Pass 1 · base"));
+      const q1Steps = NI(S.q.p1Steps, 1, 100, 1, v => { S.q.p1Steps = Math.max(1, Math.round(v || 8)); persist(); });
+      const q1Cfg = NI(S.q.p1Cfg, 0, 30, 0.1, v => { S.q.p1Cfg = isFinite(v) ? v : 1.0; persist(); });
+      advQ1.appendChild(advGrid(["Steps", q1Steps], ["CFG", q1Cfg]));
+      advPanel.append(advT2I1, advQ1);
 
       // seed (reference keeps seed in the advanced box)
       const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); });
@@ -830,22 +851,44 @@ app.registerExtension({
       syncSeedUI();
 
       // pass 2
-      advPanel.appendChild(advDivider("Pass 2 · refine"));
+      advT2I2.appendChild(advDivider("Pass 2 · refine"));
       const p2Steps = NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); });
       const p2Cfg = NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); });
       const p2Start = NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); });
-      advPanel.appendChild(advGrid(["Steps", p2Steps], ["CFG", p2Cfg], ["Start", p2Start]));
+      advT2I2.appendChild(advGrid(["Steps", p2Steps], ["CFG", p2Cfg], ["Start", p2Start]));
       const p2Samp = DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); });
       const p2Sched = DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); });
-      advPanel.appendChild(advGrid(["Sampler", p2Samp], ["Sched", p2Sched]));
+      advT2I2.appendChild(advGrid(["Sampler", p2Samp], ["Sched", p2Sched]));
 
       // upscale
-      advPanel.appendChild(advDivider("Upscale (latent)"));
+      advT2I2.appendChild(advDivider("Upscale (latent)"));
       const upMeth = DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); });
       const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); });
-      advPanel.appendChild(advGrid(["Method", upMeth], ["×", upFac]));
+      advT2I2.appendChild(advGrid(["Method", upMeth], ["×", upFac]));
 
-      const syncAdv = () => { advPanel.style.display = S.advancedUI ? "flex" : "none"; };
+      // T2I HQ pass 2 + post (same-res refine; pass-2 steps = ceil(denoise × 8))
+      advQ2.appendChild(advDivider("Pass 2 · refine"));
+      const q2Den = NI(S.q.denoise, 0.05, 1, 0.05, v => { S.q.denoise = isFinite(v) ? Math.min(1, Math.max(0.05, v)) : 0.2; persist(); });
+      const q2Eta = NI(S.q.eta, 0, 2, 0.05, v => { S.q.eta = isFinite(v) ? v : 0.9; persist(); });
+      advQ2.appendChild(advGrid(["Denoise", q2Den], ["Eta", q2Eta]));
+      advQ2.appendChild(advDivider("Post"));
+      const qGrain = NI(S.q.grain, 0, 1, 0.01, v => { S.q.grain = isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.09; persist(); });
+      const qSharp = NI(S.q.sharpen, 1, 12, 1, v => { S.q.sharpen = Math.min(12, Math.max(1, Math.round(v || 1))); persist(); });
+      advQ2.appendChild(advGrid(["Grain", qGrain], ["Sharpen", qSharp]));
+      advQ2.appendChild(advDivider("Enhancer"));
+      const qEnh = NI(S.q.enhance, 0, 2, 0.05, v => { S.q.enhance = isFinite(v) ? Math.min(2, Math.max(0, v)) : 1.5; persist(); });
+      qEnh.title = "Krea2T enhancer strength (0 = off)";
+      advQ2.appendChild(advGrid(["Strength", qEnh]));
+      advPanel.append(advT2I2, advQ2);
+
+      const syncAdv = () => {
+        advPanel.style.display = S.advancedUI ? "flex" : "none";
+        const q = S.tab === "t2iq";
+        advT2I1.style.display = q ? "none" : "flex";
+        advT2I2.style.display = q ? "none" : "flex";
+        advQ1.style.display = q ? "flex" : "none";
+        advQ2.style.display = q ? "flex" : "none";
+      };
       syncAdv();
 
       // spacer then Generate pinned to bottom
@@ -1083,7 +1126,8 @@ app.registerExtension({
       // prompt bar and Generate label for the prompt-list column + estimate.
       function syncTab() {
         const scene = S.tab === "scene";
-        setPillActive(pillT2I, !scene);
+        setPillActive(pillT2I, S.tab === "t2i");
+        setPillActive(pillQ, S.tab === "t2iq");
         setPillActive(pillScene, scene);
         batchDD.style.display = scene ? "none" : "";
         sceneCol.style.display = scene ? "flex" : "none";
@@ -1094,6 +1138,8 @@ app.registerExtension({
           genBtn.appendChild(genSweep);
         }
         if (scene) updateEstimate();
+        syncAdv();
+        syncSize();
       }
       function setTab(t) {
         if (S.tab === t) return;
@@ -1425,70 +1471,89 @@ app.registerExtension({
       }
 
       // ── template patch + submit ────────────────────────────────────────────
-      let _template = null;
-      async function getTemplate() {
-        if (!_template) {
-          const r = await api.fetchApi("/krea2_onenode/workflow_generate");
+      const _templates = {};   // "generate" (T2I/Scene) | "quality" (T2I HQ)
+      async function getTemplate(which = "generate") {
+        if (!_templates[which]) {
+          const r = await api.fetchApi(`/krea2_onenode/workflow_${which}`);
           if (!r.ok) throw new Error(`template fetch failed (${r.status})`);
-          _template = await r.json();
+          _templates[which] = await r.json();
         }
-        return _template;
+        return _templates[which];
       }
 
       // Default opts reproduce the single-run T2I behavior exactly; the Scene
       // tab overrides prompt/batch/seed per queued row and forces SaveImage.
+      // Works on both templates: node ids are prefixed "K2:" (generate) or
+      // "K2Q:" (quality) — detected from the template itself.
       function buildPrompt(tpl, o = {}) {
         const { promptText = S.prompt, batch = S.batch, seed = null, forceSave = false } = o;
         const p = JSON.parse(JSON.stringify(tpl));
         const d = dims();
+        const q = !!p["K2Q:unet"];
+        const id = (k) => (q ? "K2Q:" : "K2:") + k;
 
-        p["K2:unet"].inputs.unet_name = S.modelUnet;
-        p["K2:clip"].inputs.clip_name = S.modelClip;
-        p["K2:vae"].inputs.vae_name = S.modelVae;
+        p[id("unet")].inputs.unet_name = S.modelUnet;
+        p[id("clip")].inputs.clip_name = S.modelClip;
+        p[id("vae")].inputs.vae_name = S.modelVae;
 
-        p["K2:pos"].inputs.text = promptText || "";
-        p["K2:latent"].inputs.width = d.w;
-        p["K2:latent"].inputs.height = d.h;
-        p["K2:latent"].inputs.batch_size = batch;
+        p[id("pos")].inputs.text = promptText || "";
+        p[id("latent")].inputs.width = d.w;
+        p[id("latent")].inputs.height = d.h;
+        p[id("latent")].inputs.batch_size = batch;
 
         if (seed != null) {
-          p["K2:seed"].inputs.seed = seed;
+          p[id("seed")].inputs.seed = seed;
         } else {
           if (S.randomizeSeed) S.seed = Math.floor(Math.random() * 1e15);
           S.lastSeed = S.seed;
           seedIn.value = S.seed;
           syncSeedUI();
-          p["K2:seed"].inputs.seed = S.seed;
+          p[id("seed")].inputs.seed = S.seed;
         }
 
         // LoRA stack → Power Lora Loader dynamic inputs
         let li = 1;
         for (const row of S.loras) {
           if (!row.name) continue;
-          p["K2:lora"].inputs[`lora_${li}`] = {
+          p[id("lora")].inputs[`lora_${li}`] = {
             on: !!row.on, lora: row.name, strength: row.strength, strengthTwo: null,
           };
           li++;
         }
 
-        p["K2:sampler1"].inputs.steps = S.p1.steps;
-        p["K2:sampler1"].inputs.cfg = S.p1.cfg;
-        p["K2:sampler1"].inputs.sampler_name = S.p1.sampler;
-        p["K2:sampler1"].inputs.scheduler = S.p1.scheduler;
-        p["K2:sampler1"].inputs.end_at_step = S.p1.endStep;
-        p["K2:sampler2"].inputs.steps = S.p2.steps;
-        p["K2:sampler2"].inputs.cfg = S.p2.cfg;
-        p["K2:sampler2"].inputs.sampler_name = S.p2.sampler;
-        p["K2:sampler2"].inputs.scheduler = S.p2.scheduler;
-        p["K2:sampler2"].inputs.start_at_step = S.p2.startStep;
-        p["K2:upscale"].inputs.upscale_method = S.upscaleMethod;
-        p["K2:upscale"].inputs.scale_by = S.upscaleBy;
+        if (q) {
+          // Quality (ClownsharK): pass 2 refines the pass-1 latent at the same
+          // resolution; its step count follows the source workflow's
+          // ceil(denoise × 8) expression.
+          p["K2Q:enh"].inputs.enabled = S.q.enhance > 0;
+          p["K2Q:enh"].inputs.strength = S.q.enhance;
+          p["K2Q:sampler1"].inputs.steps = S.q.p1Steps;
+          p["K2Q:sampler1"].inputs.cfg = S.q.p1Cfg;
+          p["K2Q:sampler2"].inputs.denoise = S.q.denoise;
+          p["K2Q:sampler2"].inputs.eta = S.q.eta;
+          p["K2Q:sampler2"].inputs.steps = Math.max(1, Math.ceil(S.q.denoise * 8));
+          p["K2Q:grain"].inputs.grain_power = S.q.grain;
+          p["K2Q:sharp"].inputs.iterations = S.q.sharpen;
+        } else {
+          p["K2:sampler1"].inputs.steps = S.p1.steps;
+          p["K2:sampler1"].inputs.cfg = S.p1.cfg;
+          p["K2:sampler1"].inputs.sampler_name = S.p1.sampler;
+          p["K2:sampler1"].inputs.scheduler = S.p1.scheduler;
+          p["K2:sampler1"].inputs.end_at_step = S.p1.endStep;
+          p["K2:sampler2"].inputs.steps = S.p2.steps;
+          p["K2:sampler2"].inputs.cfg = S.p2.cfg;
+          p["K2:sampler2"].inputs.sampler_name = S.p2.sampler;
+          p["K2:sampler2"].inputs.scheduler = S.p2.scheduler;
+          p["K2:sampler2"].inputs.start_at_step = S.p2.startStep;
+          p["K2:upscale"].inputs.upscale_method = S.upscaleMethod;
+          p["K2:upscale"].inputs.scale_by = S.upscaleBy;
+        }
 
         // auto-save off → PreviewImage (temp) instead of SaveImage
         // (scene runs pass forceSave — unattended results must land on disk)
         if (!S.autoSave && !forceSave) {
-          p["K2:save"] = {
-            inputs: { images: p["K2:save"].inputs.images },
+          p[id("save")] = {
+            inputs: { images: p[id("save")].inputs.images },
             class_type: "PreviewImage",
             _meta: { title: "Preview (unsaved)" },
           };
@@ -1508,7 +1573,7 @@ app.registerExtension({
         setStatus("Queued…");
         persist();
         try {
-          const tpl = await getTemplate();
+          const tpl = await getTemplate(S.tab === "t2iq" ? "quality" : "generate");
 
           // Batch ×N runs as N sequential single-image jobs (seed, seed+1, …)
           // instead of one batched latent: batched sampling degrades quality
