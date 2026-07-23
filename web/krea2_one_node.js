@@ -382,6 +382,13 @@ if (!window.__krea2_listeners) {
     if (!_isOurs(evt)) return;
     const a = _active();
     const d = evt.detail;
+    if (d?.max) {
+      // Feed the preview-overlay progress bar (per-node percentage; the node
+      // id tells us which sampling pass is running).
+      const nodeId = String(d.node || "");
+      const pass = nodeId.endsWith("sampler1") ? "Pass 1 · " : nodeId.endsWith("sampler2") ? "Pass 2 · " : "";
+      a.setStage?.(`${pass}Step ${d.value}/${d.max}`, d.value / d.max * 100);
+    }
     const bjob = _batchJob(evt);
     if (bjob) {
       if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · Sampling ${d.value}/${d.max}`);
@@ -1257,6 +1264,36 @@ app.registerExtension({
       scrollGuard(thumbStrip, true);
       right.appendChild(thumbStrip);
 
+      // Progress bar — overlaid at the bottom of the preview box, same design
+      // as the one-node-flux-2-klein reference (gradient scrim, lime fill).
+      // pointerEvents none so batch thumbs behind it stay clickable.
+      const progWrap = mk("div", {
+        position: "absolute", bottom: "0", left: "0", right: "0",
+        background: "linear-gradient(transparent,rgba(0,0,0,.88))",
+        padding: "16px 14px 12px", display: "none",
+        flexDirection: "column", gap: "4px", boxSizing: "border-box",
+        pointerEvents: "none", zIndex: "6",
+      });
+      const progTop = mk("div", { display: "flex", justifyContent: "space-between", alignItems: "center" });
+      const progStageL = mk("div", { fontSize: "11px", fontWeight: "600", color: C.text, textAlign: "center", flex: "1" });
+      tx(progStageL, "Generating…");
+      const progPct = mk("div", { fontSize: "10px", color: C.muted, flexShrink: "0" });
+      tx(progPct, "0%");
+      progTop.append(progStageL, progPct);
+      const progBar = mk("div", { height: "3px", borderRadius: "2px", background: "rgba(255,255,255,.15)", overflow: "hidden", marginTop: "4px" });
+      const progFill = mk("div", { height: "100%", background: LIME, width: "0%", transition: "width .3s ease", borderRadius: "2px" });
+      progBar.appendChild(progFill);
+      const progDetailL = mk("div", { fontSize: "9px", color: "rgba(255,255,255,.5)", textAlign: "center", marginTop: "2px" });
+      progWrap.append(progTop, progBar, progDetailL);
+      right.appendChild(progWrap);
+      const setStage = (detail, pct) => {
+        tx(progDetailL, detail);
+        progFill.style.width = pct + "%";
+        tx(progPct, Math.round(pct) + "%");
+      };
+      const progShow = () => { setStage("Waiting in queue…", 0); progWrap.style.display = "flex"; };
+      const progHide = () => { progWrap.style.display = "none"; };
+
       // ── PROMPT ─────────────────────────────────────────────────────────────
       const promptWrap = mk("div", { display: "flex", flexDirection: "column", gap: "5px", flex: "0 0 auto" });
       const promptHdr = mk("div", { display: "flex", alignItems: "center", gap: "5px" });
@@ -1622,6 +1659,7 @@ app.registerExtension({
         if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
         S._generating = true;
         timerStart();
+        progShow();
         tx(genBtn, "Generating…");
         genBtn.appendChild(genSweep);
         genBtn.style.background = C.bg3;
@@ -1645,7 +1683,7 @@ app.registerExtension({
             S._batchRun = { jobs: new Map(), total: S.batch, done: 0, images: [] };
             // Register before the first POST — the first job can start
             // emitting events while later jobs are still being queued.
-            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate };
+            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate };
             let failed = null;
             for (let i = 0; i < S.batch; i++) {
               const prompt = buildPrompt(tpl, { batch: 1, seed: base + i });
@@ -1690,7 +1728,7 @@ app.registerExtension({
             throw new Error(nodeErrs || msg);
           }
           S._promptId = result.prompt_id || null;
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate };
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate };
           setStatus("Running…");
         } catch (e) {
           finishGenerate();
@@ -1701,6 +1739,7 @@ app.registerExtension({
       function finishGenerate() {
         S._generating = false;
         timerStop();
+        progHide();
         tx(genBtn, S.tab === "scene" ? "Run Scene" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
@@ -1719,6 +1758,7 @@ app.registerExtension({
         if (!rows.length) { setStatus("Add at least one prompt.", C.err); return; }
         S._generating = true;
         timerStart();
+        progShow();
         tx(genBtn, "Queueing…");
         genBtn.appendChild(genSweep);
         genBtn.style.background = C.bg3;
@@ -1737,7 +1777,7 @@ app.registerExtension({
           syncSceneLock();
           // Register before the first POST — the first job can start emitting
           // events while later rows are still being queued.
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, done: finishGenerate, sceneRowUpdate };
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate, sceneRowUpdate };
           let lastSeed = null, seq = 0, rowsQueued = 0, failed = null;
           queueLoop:
           for (let si = 0; si < rows.length; si++) {
