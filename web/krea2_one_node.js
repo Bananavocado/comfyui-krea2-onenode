@@ -750,11 +750,6 @@ app.registerExtension({
       }
 
       // BATCH
-      const batchCap = cap("Batch"); batchCap.style.marginTop = "12px";
-      left.appendChild(batchCap);
-      const batchWrap = mk("div", { width: "90px" });
-      batchWrap.appendChild(DD(() => [1, 2, 4, 8], S.batch, (n) => { S.batch = n; persist(); }, (n) => `×${n}`));
-      left.appendChild(batchWrap);
 
       // ── ADVANCED CONTROL box (indigo, toggled from Settings prefs) ─────────
       const advCap = (t) => tx(mk("span", {
@@ -943,7 +938,25 @@ app.registerExtension({
           stopBtn.style.opacity = "0"; stopBtn.style.padding = "0"; stopBtn.style.marginLeft = "0";
         }
       }
-      genRow.append(genBtn, stopBtn);
+      // BATCH — lime "×N ▾" chip next to Generate, like the reference node.
+      const batchDD = DD(() => [1, 2, 4, 8], S.batch, (n) => {
+        S.batch = n; persist();
+        batchTxt.style.color = "#111"; // DD's setTxt paints the value lime; chip needs dark-on-lime
+      }, (n) => `×${n}`);
+      Object.assign(batchDD.style, { width: "auto", minWidth: "0", flexShrink: "0", marginLeft: "8px" });
+      const batchTrig = batchDD.children[0];
+      Object.assign(batchTrig.style, {
+        background: LIME, border: "2px solid transparent", borderRadius: "8px",
+        height: "38px", padding: "0 12px", gap: "2px",
+      });
+      const batchTxt = batchTrig.children[0];
+      Object.assign(batchTxt.style, { color: "#111", fontSize: "13px", fontWeight: "700", flex: "none", overflow: "visible" });
+      const batchArr = batchTrig.children[1];
+      batchArr.style.color = "#111";
+      batchTrig.onmouseenter = () => { batchTrig.style.filter = "brightness(1.08)"; };
+      batchTrig.onmouseleave = () => { batchTrig.style.filter = ""; };
+
+      genRow.append(genBtn, batchDD, stopBtn);
       left.appendChild(genRow);
 
       // ── scene column (SCENE tab): multi-prompt queue ───────────────────────
@@ -1072,8 +1085,7 @@ app.registerExtension({
         const scene = S.tab === "scene";
         setPillActive(pillT2I, !scene);
         setPillActive(pillScene, scene);
-        batchCap.style.display = scene ? "none" : "";
-        batchWrap.style.display = scene ? "none" : "";
+        batchDD.style.display = scene ? "none" : "";
         sceneCol.style.display = scene ? "flex" : "none";
         promptWrap.style.display = scene ? "none" : "";
         estimateLine.style.display = scene ? "" : "none";
