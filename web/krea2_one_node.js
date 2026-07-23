@@ -1286,12 +1286,22 @@ app.registerExtension({
         flexDirection: "column", gap: "4px", boxSizing: "border-box",
         pointerEvents: "none", zIndex: "6",
       });
-      const progTop = mk("div", { display: "flex", justifyContent: "space-between", alignItems: "center" });
-      const progStageL = mk("div", { fontSize: "11px", fontWeight: "600", color: C.text, textAlign: "center", flex: "1" });
-      tx(progStageL, "Generating…");
+      const progTop = mk("div", { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" });
+      // Stage label doubles as the status surface (the old status row below
+      // the prompt is gone — setStatus writes here).
+      const progStageL = mk("div", {
+        fontSize: "11px", fontWeight: "600", color: C.text, textAlign: "left", flex: "1",
+        minWidth: "0", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+      });
+      // Execution timer — lives in the overlay next to the percentage: lime
+      // live elapsed while running, frozen muted total after.
+      const timerEl = mk("div", {
+        fontSize: "10px", color: C.muted, flexShrink: "0", display: "none",
+        fontVariantNumeric: "tabular-nums",
+      });
       const progPct = mk("div", { fontSize: "10px", color: C.muted, flexShrink: "0" });
       tx(progPct, "0%");
-      progTop.append(progStageL, progPct);
+      progTop.append(progStageL, timerEl, progPct);
       const progBar = mk("div", { height: "3px", borderRadius: "2px", background: "rgba(255,255,255,.15)", overflow: "hidden", marginTop: "4px" });
       const progFill = mk("div", { height: "100%", background: LIME, width: "0%", transition: "width .3s ease", borderRadius: "2px" });
       progBar.appendChild(progFill);
@@ -1317,8 +1327,22 @@ app.registerExtension({
         const p2 = Math.max(1, S.p2.steps - S.p2.startStep);
         return { split: p1 / (p1 + p2), p2Start: S.p2.startStep };
       }
-      const progShow = () => { setStage("Waiting in queue…", 0); progWrap.style.display = "flex"; };
-      const progHide = () => { progWrap.style.display = "none"; };
+      // Running mode: full overlay (bar + detail + %). Idle mode: status text
+      // and frozen timer only — used after a run ends and for standalone
+      // status messages (save/clear/refresh confirmations).
+      const progShow = () => {
+        progBar.style.display = "";
+        progDetailL.style.display = "";
+        progPct.style.display = "";
+        setStage("Waiting in queue…", 0);
+        progWrap.style.display = "flex";
+      };
+      const progIdle = () => {
+        progBar.style.display = "none";
+        progDetailL.style.display = "none";
+        progPct.style.display = "none";
+        progWrap.style.display = "flex";
+      };
 
       // ── PROMPT ─────────────────────────────────────────────────────────────
       const promptWrap = mk("div", { display: "flex", flexDirection: "column", gap: "5px", flex: "0 0 auto" });
@@ -1354,20 +1378,14 @@ app.registerExtension({
       requestAnimationFrame(taGrow);
       root.appendChild(promptWrap);
 
-      const statusRow = mk("div", { display: "flex", alignItems: "center", gap: "10px", flex: "0 0 auto" });
-      const statusLine = mk("div", {
-        fontSize: "10px", color: C.muted, minHeight: "13px", flex: "1", minWidth: "0",
-        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-      });
-      // Execution timer — live elapsed while a run is active (lime), frozen at
-      // the total duration once it finishes (muted) until the next run.
-      const timerEl = mk("div", {
-        fontSize: "10px", color: C.muted, flexShrink: "0", display: "none",
-        fontVariantNumeric: "tabular-nums",
-      });
-      statusRow.append(statusLine, timerEl);
-      root.appendChild(statusRow);
-      const setStatus = (t, color = C.muted) => { statusLine.textContent = t; statusLine.style.color = color; };
+      // Status messages render in the preview overlay's stage label (no more
+      // status row under the prompt). A message outside a run pops the
+      // overlay in idle mode so save/clear/error feedback stays visible.
+      const setStatus = (t, color = C.text) => {
+        tx(progStageL, t);
+        progStageL.style.color = color;
+        if (progWrap.style.display === "none") progIdle();
+      };
 
       let _timerIv = null;
       const fmtDur = (ms) => {
@@ -1765,7 +1783,7 @@ app.registerExtension({
       function finishGenerate() {
         S._generating = false;
         timerStop();
-        progHide();
+        progIdle();
         tx(genBtn, S.tab === "scene" ? "Run Scene" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
