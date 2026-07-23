@@ -1291,12 +1291,45 @@ app.registerExtension({
       requestAnimationFrame(taGrow);
       root.appendChild(promptWrap);
 
+      const statusRow = mk("div", { display: "flex", alignItems: "center", gap: "10px", flex: "0 0 auto" });
       const statusLine = mk("div", {
-        fontSize: "10px", color: C.muted, minHeight: "13px", flex: "0 0 auto",
+        fontSize: "10px", color: C.muted, minHeight: "13px", flex: "1", minWidth: "0",
         whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
       });
-      root.appendChild(statusLine);
+      // Execution timer — live elapsed while a run is active (lime), frozen at
+      // the total duration once it finishes (muted) until the next run.
+      const timerEl = mk("div", {
+        fontSize: "10px", color: C.muted, flexShrink: "0", display: "none",
+        fontVariantNumeric: "tabular-nums",
+      });
+      statusRow.append(statusLine, timerEl);
+      root.appendChild(statusRow);
       const setStatus = (t, color = C.muted) => { statusLine.textContent = t; statusLine.style.color = color; };
+
+      let _timerIv = null;
+      const fmtDur = (ms) => {
+        const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60);
+        const pad = (n) => String(n).padStart(2, "0");
+        return h ? `${h}:${pad(m % 60)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`;
+      };
+      function timerStart() {
+        S._runStart = Date.now();
+        timerEl.style.display = "";
+        timerEl.style.color = LIME;
+        tx(timerEl, "⏱ 0:00");
+        if (_timerIv) clearInterval(_timerIv);
+        _timerIv = setInterval(() => {
+          if (S._runStart) tx(timerEl, "⏱ " + fmtDur(Date.now() - S._runStart));
+        }, 500);
+      }
+      function timerStop() {
+        if (_timerIv) { clearInterval(_timerIv); _timerIv = null; }
+        if (S._runStart) {
+          tx(timerEl, "⏱ " + fmtDur(Date.now() - S._runStart));
+          timerEl.style.color = C.muted;
+          S._runStart = null;
+        }
+      }
 
       // ── LoRA rows (rendered into the left-column loraBox) ──────────────────
       function renderLoraRows() {
@@ -1588,6 +1621,7 @@ app.registerExtension({
         if (S._generating) return;
         if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
         S._generating = true;
+        timerStart();
         tx(genBtn, "Generating…");
         genBtn.appendChild(genSweep);
         genBtn.style.background = C.bg3;
@@ -1666,6 +1700,7 @@ app.registerExtension({
       }
       function finishGenerate() {
         S._generating = false;
+        timerStop();
         tx(genBtn, S.tab === "scene" ? "Run Scene" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
@@ -1683,6 +1718,7 @@ app.registerExtension({
           .filter(r => r.prompt);
         if (!rows.length) { setStatus("Add at least one prompt.", C.err); return; }
         S._generating = true;
+        timerStart();
         tx(genBtn, "Queueing…");
         genBtn.appendChild(genSweep);
         genBtn.style.background = C.bg3;
