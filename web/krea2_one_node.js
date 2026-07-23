@@ -21,17 +21,24 @@ const MIN_H = 430;
 const LS_KEY = "krea2_onenode_state";
 
 // Size presets (base generation size; the latent upscale factor applies on top).
+// w/h are the landscape base dims, rounded to multiples of 16; the orientation
+// toggle swaps them. Squares ignore orientation.
 const PRESETS = [
-  { w: 1920, h: 1088 },  // 1080p landscape
-  { w: 1088, h: 1920 },  // 1080p portrait
-  { w: 1280, h: 720 },   // 720p landscape
-  { w: 720,  h: 1280 },  // 720p portrait
-  { w: 640,  h: 480 },   // VGA landscape
-  { w: 480,  h: 640 },   // VGA portrait
-  { w: 1024, h: 1024 },  // 1:1
-  { w: 512,  h: 512 },   // 1:1 small
+  { label: "360p",  w: 640,  h: 368 },
+  { label: "480p",  w: 864,  h: 480 },
+  { label: "720p",  w: 1280, h: 720 },
+  { label: "1080p", w: 1920, h: 1088 },
+  { label: "2K",    w: 2560, h: 1440 },
+  { label: "4K",    w: 3840, h: 2160 },
+  { label: "Square (512×512)",   w: 512,  h: 512,  square: true },
+  { label: "Square (1024×1024)", w: 1024, h: 1024, square: true },
 ];
 const CUSTOM = -1;
+// Old numeric presetIdx (pre-orientation states) → [new presetIdx, orient].
+const LEGACY_PRESET_MAP = {
+  0: [3, "land"], 1: [3, "port"], 2: [2, "land"], 3: [2, "port"],
+  4: [1, "land"], 5: [1, "port"], 6: [7, "land"], 7: [6, "land"],
+};
 
 const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "res_multistep", "lcm", "ddim", "uni_pc", "er_sde"];
 const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", "beta", "linear_quadratic", "kl_optimal"];
@@ -47,7 +54,8 @@ const PER_IMAGE_MIN = 2.5;
 function defaultState() {
   return {
     prompt: "",
-    presetIdx: 2,               // 1280×720
+    presetIdx: 2,               // 720p
+    orient: "land",             // "land" | "port" (ignored for squares/custom)
     customW: 1280, customH: 720,
     batch: 1,
     seed: Math.floor(Math.random() * 1e15),
@@ -71,6 +79,13 @@ function defaultState() {
 function loadState() {
   try {
     const s = Object.assign(defaultState(), JSON.parse(localStorage.getItem(LS_KEY) || "{}"));
+    if (s.orient !== "land" && s.orient !== "port") {
+      // Pre-orientation state: remap the old preset list onto the new one.
+      s.orient = "land";
+      if (s.presetIdx !== CUSTOM && LEGACY_PRESET_MAP[s.presetIdx]) {
+        [s.presetIdx, s.orient] = LEGACY_PRESET_MAP[s.presetIdx];
+      }
+    }
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
     if (s.tab !== "scene") s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
@@ -664,55 +679,74 @@ app.registerExtension({
       scrollGuard(left);
       mainRow.appendChild(left);
 
-      // SIZE — dropdown of "W × H" + Custom…, like the original
+      // SIZE — named preset dropdown + orientation toggle; W/H boxes only for
+      // Custom. Presets store landscape base dims; "port" swaps them.
       left.appendChild(cap("Size"));
+      const dims = () => {
+        if (S.presetIdx === CUSTOM) return { w: S.customW, h: S.customH };
+        const p = PRESETS[S.presetIdx];
+        return (!p.square && S.orient === "port") ? { w: p.h, h: p.w } : { w: p.w, h: p.h };
+      };
+      const sizeRow = mk("div", { display: "flex", alignItems: "center", gap: "6px" });
       const sizeItems = () => [...PRESETS.map((_, i) => i), CUSTOM];
-      const sizeLbl = (i) => i === CUSTOM ? "Custom…" : `${PRESETS[i].w} × ${PRESETS[i].h}`;
+      const sizeLbl = (i) => i === CUSTOM ? "Custom…" : PRESETS[i].label;
       const presetDD = DD(sizeItems, S.presetIdx, (i) => {
         S.presetIdx = i;
-        if (i !== CUSTOM) { S.customW = PRESETS[i].w; S.customH = PRESETS[i].h; }
+        if (i !== CUSTOM) { const d = dims(); S.customW = d.w; S.customH = d.h; }
         persist(); syncSize();
       }, sizeLbl);
-      left.appendChild(presetDD);
-
-      const whRow = mk("div", { display: "flex", alignItems: "center", gap: "6px", marginTop: "8px" });
-      const dims = () => S.presetIdx === CUSTOM
-        ? { w: S.customW, h: S.customH }
-        : { w: PRESETS[S.presetIdx].w, h: PRESETS[S.presetIdx].h };
-      const wIn = NI(dims().w, 64, 4096, 16, (v) => {
-        S.customW = Math.max(64, Math.round((v || 64) / 16) * 16);
-        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
-      }, "72px");
-      const hIn = NI(dims().h, 64, 4096, 16, (v) => {
-        S.customH = Math.max(64, Math.round((v || 64) / 16) * 16);
-        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
-      }, "72px");
-      const swapBtn = mk("button", {
+      const ddWrap = mk("div", { flex: "1", minWidth: "0" });
+      ddWrap.appendChild(presetDD);
+      const orientBtn = mk("button", {
         background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "6px",
         width: "28px", height: "28px", cursor: "pointer", color: C.muted, fontSize: "12px",
         outline: "none", flexShrink: "0", transition: "color .15s,border-color .15s",
-      }, { title: "Swap orientation" });
-      tx(swapBtn, "⇅");
-      swapBtn.onmouseenter = () => { swapBtn.style.color = C.text; swapBtn.style.borderColor = C.borderH; };
-      swapBtn.onmouseleave = () => { swapBtn.style.color = C.muted; swapBtn.style.borderColor = C.border; };
-      swapBtn.onclick = (e) => {
+      }, { title: "Landscape / portrait" });
+      orientBtn.onmouseenter = () => { if (!orientBtn.disabled) { orientBtn.style.color = C.text; orientBtn.style.borderColor = C.borderH; } };
+      orientBtn.onmouseleave = () => { orientBtn.style.color = C.muted; orientBtn.style.borderColor = C.border; };
+      orientBtn.onclick = (e) => {
         e.stopPropagation();
-        const d = dims();
-        if (S.presetIdx !== CUSTOM) {
-          const j = PRESETS.findIndex(p => p.w === d.h && p.h === d.w);
-          if (j >= 0) { S.presetIdx = j; presetDD._setValue(j); persist(); syncSize(); return; }
+        if (S.presetIdx !== CUSTOM && PRESETS[S.presetIdx].square) return;
+        if (S.presetIdx === CUSTOM) {
+          const t = S.customW; S.customW = S.customH; S.customH = t;
+          S.orient = S.customW >= S.customH ? "land" : "port";
+        } else {
+          S.orient = S.orient === "land" ? "port" : "land";
         }
-        S.customW = d.h; S.customH = d.w;
-        S.presetIdx = CUSTOM; presetDD._setValue(CUSTOM); persist(); syncSize();
+        persist(); syncSize();
       };
-      const finalTxt = mk("div", { fontSize: "9px", color: "rgba(240,255,65,.55)", fontWeight: "700", whiteSpace: "nowrap" });
-      whRow.append(wIn, noDrag(swapBtn), hIn, finalTxt);
+      sizeRow.append(ddWrap, noDrag(orientBtn));
+      left.appendChild(sizeRow);
+
+      const whRow = mk("div", { display: "none", alignItems: "center", gap: "6px", marginTop: "8px" });
+      const wIn = NI(dims().w, 64, 4096, 16, (v) => {
+        S.customW = Math.max(64, Math.round((v || 64) / 16) * 16);
+        persist(); syncSize();
+      }, "72px");
+      const hIn = NI(dims().h, 64, 4096, 16, (v) => {
+        S.customH = Math.max(64, Math.round((v || 64) / 16) * 16);
+        persist(); syncSize();
+      }, "72px");
+      const xTxt = tx(mk("span", { color: C.muted, fontSize: "10px", flexShrink: "0" }), "×");
+      whRow.append(wIn, xTxt, hIn);
       left.appendChild(whRow);
+
+      const finalTxt = mk("div", {
+        fontSize: "9px", color: "rgba(240,255,65,.55)", fontWeight: "700",
+        whiteSpace: "nowrap", marginTop: "6px",
+      });
+      left.appendChild(finalTxt);
 
       function syncSize() {
         const d = dims();
         wIn.value = d.w; hIn.value = d.h;
-        tx(finalTxt, `→ ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
+        whRow.style.display = S.presetIdx === CUSTOM ? "flex" : "none";
+        const sq = S.presetIdx !== CUSTOM && PRESETS[S.presetIdx].square;
+        orientBtn.disabled = sq;
+        orientBtn.style.opacity = sq ? ".35" : "1";
+        orientBtn.style.cursor = sq ? "default" : "pointer";
+        tx(orientBtn, d.w >= d.h ? "▭" : "▯");
+        tx(finalTxt, `${d.w}×${d.h} → ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
       }
 
       // BATCH
