@@ -689,6 +689,14 @@ app.registerExtension({
       scrollGuard(left);
       mainRow.appendChild(left);
 
+      // ADVANCED toggle — lives at the top of the left column (moved out of
+      // Settings preferences); shows/hides the indigo advanced box below.
+      const advTogRow = mk("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px", flexShrink: "0" });
+      const advTogCap = cap("Advanced"); advTogCap.style.marginBottom = "0";
+      advTogRow.append(advTogCap, mk("div", { flex: "1" }),
+        Toggle(S.advancedUI, v => { S.advancedUI = v; persist(); syncAdv(); }));
+      left.appendChild(advTogRow);
+
       // SIZE — named preset dropdown + orientation toggle; W/H boxes only for
       // Custom. Presets store landscape base dims; "port" swaps them.
       left.appendChild(cap("Size"));
@@ -764,12 +772,9 @@ app.registerExtension({
 
       // BATCH
 
-      // ── POST-PROCESSING (T2I HQ tab only) — always visible, deliberately
-      // NOT behind the Advanced pref. Off deletes the node from the submitted
-      // graph (buildPrompt rewires decode → [grain] → [sharpen] → save).
-      const postBox = mk("div", { display: "none", flexDirection: "column", gap: "7px", marginTop: "12px" });
-      const postCap = cap("Post-processing"); postCap.style.marginBottom = "0";
-      postBox.appendChild(postCap);
+      // ── POST-PROCESSING controls (rendered inside the HQ advanced section).
+      // Off deletes the node from the submitted graph (buildPrompt rewires
+      // decode → [grain] → [sharpen] → save).
       const qGrain = NI(S.q.grain, 0, 1, 0.01, v => { S.q.grain = isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.09; persist(); });
       const qSharp = NI(S.q.sharpen, 1, 12, 1, v => { S.q.sharpen = Math.min(12, Math.max(1, Math.round(v || 1))); persist(); });
       const qGrainTog = Toggle(S.q.grainOn !== false, v => { S.q.grainOn = v; persist(); syncPostUI(); });
@@ -780,19 +785,7 @@ app.registerExtension({
         qSharp.disabled = S.q.sharpenOn === false;
         qSharp.style.opacity = S.q.sharpenOn === false ? ".4" : "1";
       }
-      const postRow = (label, tog, ni) => {
-        const r = mk("div", { display: "grid", gridTemplateColumns: "56px auto 1fr", gap: "8px", alignItems: "center" });
-        r.appendChild(tx(mk("span", {
-          fontSize: "9px", fontWeight: "700", letterSpacing: ".08em",
-          textTransform: "uppercase", color: C.muted,
-        }), label));
-        ni.style.width = "100%"; ni.style.minWidth = "0"; ni.style.boxSizing = "border-box";
-        r.append(tog, ni);
-        return r;
-      };
-      postBox.append(postRow("Grain", qGrainTog, qGrain), postRow("Sharpen", qSharpTog, qSharp));
       syncPostUI();
-      left.appendChild(postBox);
 
       // ── LORAS (inline list in the left column — replaces the old modal) ────
       const loraBox = mk("div", { display: "flex", flexDirection: "column", gap: "8px", marginTop: "12px" });
@@ -940,6 +933,16 @@ app.registerExtension({
       const q2Samp = DD(() => S._clown.samplers, S.q.p2Sampler, v => { S.q.p2Sampler = v; persist(); });
       const q2Sched = DD(() => S._clown.schedulers, S.q.p2Sched, v => { S.q.p2Sched = v; persist(); });
       advQ2.appendChild(advGrid(["Sampler", q2Samp], ["Sched", q2Sched]));
+      // Post-processing (toggle + value per effect; controls defined earlier).
+      advQ2.appendChild(advDivider("Post"));
+      const advPostRow = (label, tog, ni) => {
+        const r = mk("div", { display: "grid", gridTemplateColumns: "56px auto 1fr", gap: "8px", alignItems: "center" });
+        r.appendChild(advCap(label));
+        ni.style.width = "100%"; ni.style.minWidth = "0"; ni.style.boxSizing = "border-box";
+        r.append(tog, ni);
+        return r;
+      };
+      advQ2.append(advPostRow("Grain", qGrainTog, qGrain), advPostRow("Sharpen", qSharpTog, qSharp));
       // (Krea2T-Enhancer stays at the template default — enabled, strength 1.5 —
       // with no UI control, per user preference.)
       advPanel.append(advT2I2, advQ2);
@@ -947,7 +950,6 @@ app.registerExtension({
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
         const q = S.tab === "t2iq";
-        postBox.style.display = q ? "flex" : "none";
         advT2I1.style.display = q ? "none" : "flex";
         advT2I2.style.display = q ? "none" : "flex";
         advQ1.style.display = q ? "flex" : "none";
@@ -1299,9 +1301,6 @@ app.registerExtension({
       // ── LoRA rows (rendered into the left-column loraBox) ──────────────────
       function renderLoraRows() {
         loraRows.replaceChildren();
-        if (!S.loras.length) {
-          loraRows.appendChild(tx(mk("div", { color: C.muted, fontSize: "10px" }), "No LoRAs — base model only."));
-        }
         S.loras.forEach((row, idx) => {
           const r = mk("div", { display: "flex", alignItems: "center", gap: "6px", opacity: row.on ? "1" : ".45" });
           const togBtn = mk("button", {
@@ -1406,8 +1405,6 @@ app.registerExtension({
       }
       settingsOverlay.appendChild(prefRow("Notification sound on complete",
         Toggle(S.soundOn, (v) => { S.soundOn = v; persist(); })));
-      settingsOverlay.appendChild(prefRow("Advanced control (steps, CFG, sampler…)",
-        Toggle(S.advancedUI, (v) => { S.advancedUI = v; persist(); syncAdv(); })));
       settingsOverlay.appendChild(prefRow("Auto-save results",
         Toggle(S.autoSave, (v) => { S.autoSave = v; persist(); }),
         "When off, results are temporary until you click Save on the preview."));
