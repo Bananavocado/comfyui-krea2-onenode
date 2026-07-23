@@ -208,6 +208,88 @@ function NI(val, min, max, step, onChange, width = "72px") {
   return noDrag(inp);
 }
 
+// Drag-to-scrub number box: hold + drag horizontally = ±step per notch
+// (~10px of travel), plain click (no movement) = type a custom value.
+function DragNI(val, min, max, step, onChange, width = "48px") {
+  const wrap = mk("div", {
+    width, height: "28px", background: C.bg2, border: `1px solid ${C.border}`,
+    borderRadius: "6px", boxSizing: "border-box", color: C.text,
+    fontSize: "11px", display: "flex", alignItems: "center", justifyContent: "center",
+    cursor: "ew-resize", userSelect: "none", transition: "border-color .15s",
+    overflow: "hidden", flexShrink: "0",
+  });
+  let value = val;
+  const fmt = (v) => String(parseFloat((Math.round(v * 100) / 100).toFixed(2)));
+  const lbl = mk("span", { pointerEvents: "none" });
+  tx(lbl, fmt(value));
+  wrap.appendChild(lbl);
+  const clamp = (v) => Math.min(max, Math.max(min, v));
+
+  const PX_PER_STEP = 10;
+  let drag = null;
+  wrap.addEventListener("pointerdown", (e) => {
+    e.stopPropagation();               // keep LiteGraph from dragging the node
+    if (wrap._editing) return;
+    drag = { x0: e.clientX, v0: value, moved: false, id: e.pointerId };
+    try { wrap.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  wrap.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x0;
+    if (!drag.moved && Math.abs(dx) < 4) return;   // click-vs-drag threshold
+    drag.moved = true;
+    wrap.style.borderColor = LIME;
+    const v = clamp(drag.v0 + Math.round(dx / PX_PER_STEP) * step);
+    if (v !== value) { value = v; tx(lbl, fmt(value)); onChange(value); }
+  });
+  const endDrag = () => {
+    if (!drag) return;
+    const wasDrag = drag.moved;
+    try { wrap.releasePointerCapture(drag.id); } catch (err) {}
+    drag = null;
+    wrap.style.borderColor = C.border;
+    if (!wasDrag) startEdit();
+  };
+  wrap.addEventListener("pointerup", endDrag);
+  wrap.addEventListener("pointercancel", endDrag);
+
+  function startEdit() {
+    wrap._editing = true;
+    lbl.style.display = "none";
+    const inp = mk("input", {
+      width: "100%", height: "100%", background: "transparent", border: "none",
+      color: LIME, fontSize: "11px", textAlign: "center", outline: "none",
+      boxSizing: "border-box", padding: "0",
+    }, { type: "text", value: fmt(value) });
+    wrap.appendChild(inp);
+    wrap.style.cursor = "text";
+    wrap.style.borderColor = LIME;
+    const done = (commitVal) => {
+      if (!wrap._editing) return;
+      wrap._editing = false;
+      if (commitVal) {
+        const v = parseFloat(String(inp.value).replace(",", "."));
+        if (isFinite(v)) { value = clamp(v); onChange(value); }
+      }
+      inp.remove();
+      tx(lbl, fmt(value));
+      lbl.style.display = "";
+      wrap.style.cursor = "ew-resize";
+      wrap.style.borderColor = C.border;
+    };
+    inp.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") { e.preventDefault(); done(true); }
+      if (e.key === "Escape") { e.preventDefault(); done(false); }
+    });
+    inp.addEventListener("blur", () => done(true));
+    inp.addEventListener("pointerdown", (e) => e.stopPropagation());
+    requestAnimationFrame(() => { inp.focus(); inp.select(); });
+  }
+  wrap._setValue = (v) => { value = clamp(v); tx(lbl, fmt(value)); };
+  return wrap;
+}
+
 // iOS-style toggle (reference preferences)
 function Toggle(on, onChange) {
   const t = mk("button", {
@@ -1434,8 +1516,8 @@ app.registerExtension({
           dd.style.flex = "1"; dd.style.minWidth = "0";
           r.appendChild(dd);
 
-          const st = NI(row.strength, -4, 4, 0.05, (v) => { row.strength = isFinite(v) ? v : 1.0; persist(); }, "48px");
-          st.title = "Strength";
+          const st = DragNI(row.strength, -4, 4, 0.25, (v) => { row.strength = v; persist(); }, "48px");
+          st.title = "Strength — drag to adjust (±0.25 per notch), click to type";
           r.appendChild(st);
 
           const rm = mk("button", {
