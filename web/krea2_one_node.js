@@ -73,7 +73,7 @@ function defaultState() {
     upscaleMethod: "bislerp",
     upscaleBy: 1.8,
     // T2I HQ (quality template): ClownsharK two-pass, same-res refine, no upscale.
-    q: { p1Steps: 8, p1Cfg: 1.0, denoise: 0.2, eta: 0.9, grain: 0.09, sharpen: 1, enhance: 1.5 },
+    q: { p1Steps: 8, p1Cfg: 1.0, denoise: 0.2, eta: 0.9, grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true, enhance: 1.5 },
     tab: "t2i",                 // "t2i" | "t2iq" | "scene"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
@@ -874,7 +874,24 @@ app.registerExtension({
       advQ2.appendChild(advDivider("Post"));
       const qGrain = NI(S.q.grain, 0, 1, 0.01, v => { S.q.grain = isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.09; persist(); });
       const qSharp = NI(S.q.sharpen, 1, 12, 1, v => { S.q.sharpen = Math.min(12, Math.max(1, Math.round(v || 1))); persist(); });
-      advQ2.appendChild(advGrid(["Grain", qGrain], ["Sharpen", qSharp]));
+      // On/off toggles: off removes the node from the submitted graph entirely
+      // (chain is rewired in buildPrompt), the value box just dims.
+      const qGrainTog = Toggle(S.q.grainOn !== false, v => { S.q.grainOn = v; persist(); syncPostUI(); });
+      const qSharpTog = Toggle(S.q.sharpenOn !== false, v => { S.q.sharpenOn = v; persist(); syncPostUI(); });
+      const postCtl = (tog, ni) => {
+        const w = mk("div", { display: "flex", alignItems: "center", gap: "6px", minWidth: "0" });
+        ni.style.flex = "1"; ni.style.minWidth = "0"; ni.style.width = "auto";
+        w.append(tog, ni);
+        return w;
+      };
+      function syncPostUI() {
+        qGrain.disabled = S.q.grainOn === false;
+        qGrain.style.opacity = S.q.grainOn === false ? ".4" : "1";
+        qSharp.disabled = S.q.sharpenOn === false;
+        qSharp.style.opacity = S.q.sharpenOn === false ? ".4" : "1";
+      }
+      advQ2.appendChild(advGrid(["Grain", postCtl(qGrainTog, qGrain)], ["Sharpen", postCtl(qSharpTog, qSharp)]));
+      syncPostUI();
       advQ2.appendChild(advDivider("Enhancer"));
       const qEnh = NI(S.q.enhance, 0, 2, 0.05, v => { S.q.enhance = isFinite(v) ? Math.min(2, Math.max(0, v)) : 1.5; persist(); });
       qEnh.title = "Krea2T enhancer strength (0 = off)";
@@ -1532,8 +1549,20 @@ app.registerExtension({
           p["K2Q:sampler2"].inputs.denoise = S.q.denoise;
           p["K2Q:sampler2"].inputs.eta = S.q.eta;
           p["K2Q:sampler2"].inputs.steps = Math.max(1, Math.ceil(S.q.denoise * 8));
-          p["K2Q:grain"].inputs.grain_power = S.q.grain;
-          p["K2Q:sharp"].inputs.iterations = S.q.sharpen;
+          // Post toggles: an off node is deleted and the image chain rewired
+          // around it (decode → [grain] → [sharpen] → save).
+          const grainOn = S.q.grainOn !== false;
+          const sharpOn = S.q.sharpenOn !== false;
+          if (grainOn) p["K2Q:grain"].inputs.grain_power = S.q.grain;
+          else delete p["K2Q:grain"];
+          if (sharpOn) {
+            p["K2Q:sharp"].inputs.iterations = S.q.sharpen;
+            p["K2Q:sharp"].inputs.images = grainOn ? ["K2Q:grain", 0] : ["K2Q:decode", 0];
+          } else {
+            delete p["K2Q:sharp"];
+          }
+          p["K2Q:save"].inputs.images =
+            sharpOn ? ["K2Q:sharp", 0] : grainOn ? ["K2Q:grain", 0] : ["K2Q:decode", 0];
         } else {
           p["K2:sampler1"].inputs.steps = S.p1.steps;
           p["K2:sampler1"].inputs.cfg = S.p1.cfg;
