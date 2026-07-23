@@ -383,11 +383,23 @@ if (!window.__krea2_listeners) {
     const a = _active();
     const d = evt.detail;
     if (d?.max) {
-      // Feed the preview-overlay progress bar (per-node percentage; the node
-      // id tells us which sampling pass is running).
+      // Unified progress bar: pass 1 fills 0 → split, pass 2 continues
+      // split → 100 (no reset between passes). Split comes from the step
+      // settings snapshotted at submit. Non-sampler progress (tiled VAE etc.)
+      // only updates the label so the bar never jumps backwards.
       const nodeId = String(d.node || "");
-      const pass = nodeId.endsWith("sampler1") ? "Pass 1 · " : nodeId.endsWith("sampler2") ? "Pass 2 · " : "";
-      a.setStage?.(`${pass}Step ${d.value}/${d.max}`, d.value / d.max * 100);
+      const plan = a.prog || { split: 0.5, p2Start: 0 };
+      if (nodeId.endsWith("sampler1")) {
+        const f = d.value / d.max;
+        a.setStage?.(`Pass 1 · Step ${d.value}/${d.max}`, f * plan.split * 100);
+      } else if (nodeId.endsWith("sampler2")) {
+        // Rebase: a legacy pass 2 reports values from start_at_step, not 0.
+        const s = d.max > plan.p2Start ? plan.p2Start : 0;
+        const f = Math.min(1, Math.max(0, (d.value - s) / (d.max - s)));
+        a.setStage?.(`Pass 2 · Step ${d.value}/${d.max}`, (plan.split + f * (1 - plan.split)) * 100);
+      } else {
+        a.setStage?.("Finishing…", null);
+      }
     }
     const bjob = _batchJob(evt);
     if (bjob) {
@@ -1288,9 +1300,23 @@ app.registerExtension({
       right.appendChild(progWrap);
       const setStage = (detail, pct) => {
         tx(progDetailL, detail);
-        progFill.style.width = pct + "%";
-        tx(progPct, Math.round(pct) + "%");
+        if (pct != null) {  // null → update the label only, keep the bar where it is
+          progFill.style.width = pct + "%";
+          tx(progPct, Math.round(pct) + "%");
+        }
       };
+      // Unified-progress plan: pass 1 owns 0→split of the bar, pass 2 the
+      // rest. p2Start = start_at_step of the legacy pass 2 (its progress
+      // values begin there, not at 0 — the handler rebases with it).
+      function currentProgPlan() {
+        if (S.tab === "t2iq") {
+          const p1 = S.q.p1Steps, p2 = Math.max(1, Math.ceil(S.q.denoise * 8));
+          return { split: p1 / (p1 + p2), p2Start: 0 };
+        }
+        const p1 = S.p1.steps;
+        const p2 = Math.max(1, S.p2.steps - S.p2.startStep);
+        return { split: p1 / (p1 + p2), p2Start: S.p2.startStep };
+      }
       const progShow = () => { setStage("Waiting in queue…", 0); progWrap.style.display = "flex"; };
       const progHide = () => { progWrap.style.display = "none"; };
 
@@ -1683,7 +1709,7 @@ app.registerExtension({
             S._batchRun = { jobs: new Map(), total: S.batch, done: 0, images: [] };
             // Register before the first POST — the first job can start
             // emitting events while later jobs are still being queued.
-            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate };
+            window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate };
             let failed = null;
             for (let i = 0; i < S.batch; i++) {
               const prompt = buildPrompt(tpl, { batch: 1, seed: base + i });
@@ -1728,7 +1754,7 @@ app.registerExtension({
             throw new Error(nodeErrs || msg);
           }
           S._promptId = result.prompt_id || null;
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate };
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate };
           setStatus("Running…");
         } catch (e) {
           finishGenerate();
@@ -1777,7 +1803,7 @@ app.registerExtension({
           syncSceneLock();
           // Register before the first POST — the first job can start emitting
           // events while later rows are still being queued.
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, done: finishGenerate, sceneRowUpdate };
+          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate, sceneRowUpdate };
           let lastSeed = null, seq = 0, rowsQueued = 0, failed = null;
           queueLoop:
           for (let si = 0; si < rows.length; si++) {
