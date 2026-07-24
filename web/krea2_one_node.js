@@ -78,9 +78,9 @@ function defaultState() {
       denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
       grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true,
     },
-    // Upscale tab (SeedVR2 via fal.ai API — paid per call): mode "factor"
-    // (2×/4×) or "target" (fixed output resolution); noise 0.1 = node default.
-    up: { mode: "target", factor: 2, resolution: "2160p", noise: 0.1, folder: null },
+    // Upscale tab (SeedVR2 via fal.ai API — paid per call): fixed target
+    // resolution; noise 0.1 = node default.
+    up: { resolution: "2160p", noise: 0.1, folder: null },
     tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
@@ -98,10 +98,9 @@ function loadState() {
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
     s.q = Object.assign(defaultState().q, s.q || {});
     s.up = Object.assign(defaultState().up, s.up || {});
-    delete s.up.model; delete s.up.blend;   // pre-fal (4x UltraSharpV2) state
-    if (s.up.mode !== "factor" && s.up.mode !== "target") s.up.mode = "target";
-    if (![2, 4].includes(s.up.factor)) s.up.factor = 2;
-    if (!["720p", "1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
+    // Stale keys from earlier upscaler iterations (4x UltraSharpV2 / factor mode).
+    delete s.up.model; delete s.up.blend; delete s.up.mode; delete s.up.factor;
+    if (!["1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
     if (!["t2i", "t2iq", "scene", "upscale"].includes(s.tab)) s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
@@ -966,28 +965,16 @@ app.registerExtension({
       const upFacCap = cap("Upscale To"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
       upBox.appendChild(upFacCap);
       const upFacRow = mk("div", { display: "flex", gap: "5px" });
-      // SeedVR2 takes either a multiplier or a fixed target resolution — one
-      // pill row covers both (factor mode: 2×/4×; target mode: 1080p/2160p).
-      const UP_SCALES = [
-        { label: "2×", mode: "factor", factor: 2 },
-        { label: "4×", mode: "factor", factor: 4 },
-        { label: "1080p", mode: "target", resolution: "1080p" },
-        { label: "2160p", mode: "target", resolution: "2160p" },
-      ];
-      const upScaleActive = (o) => o.mode === "factor"
-        ? S.up.mode === "factor" && S.up.factor === o.factor
-        : S.up.mode === "target" && S.up.resolution === o.resolution;
-      const facPills = UP_SCALES.map(o => {
-        const p = Pill(o.label, upScaleActive(o), () => {
-          S.up.mode = o.mode;
-          if (o.mode === "factor") S.up.factor = o.factor; else S.up.resolution = o.resolution;
-          persist(); syncUpFactor();
+      const UP_RESOLUTIONS = ["1080p", "1440p", "2160p"];
+      const facPills = UP_RESOLUTIONS.map(res => {
+        const p = Pill(res, S.up.resolution === res, () => {
+          S.up.resolution = res; persist(); syncUpFactor();
         });
-        p._scale = o;
+        p._res = res;
         upFacRow.appendChild(p);
         return p;
       });
-      function syncUpFactor() { facPills.forEach(p => setPillActive(p, upScaleActive(p._scale))); }
+      function syncUpFactor() { facPills.forEach(p => setPillActive(p, S.up.resolution === p._res)); }
       upBox.appendChild(upFacRow);
       const syncUpSource = () => {
         const drop = S._upDrop;
@@ -2169,14 +2156,13 @@ app.registerExtension({
         const img = S.lastImage;
         if (!img?.filename) return;
         ctxMenu.replaceChildren(
-          ctxItem("⤢", "Upscale 2×", () => doViewerUpscale(img, { mode: "factor", factor: 2 })),
-          ctxItem("⤢", "Upscale 4×", () => doViewerUpscale(img, { mode: "factor", factor: 4 })),
-          ctxItem("⤢", "Upscale → 1080p", () => doViewerUpscale(img, { mode: "target", resolution: "1080p" })),
-          ctxItem("⤢", "Upscale → 2160p", () => doViewerUpscale(img, { mode: "target", resolution: "2160p" })),
+          ctxItem("⤢", "Upscale → 1080p", () => doViewerUpscale(img, { resolution: "1080p" })),
+          ctxItem("⤢", "Upscale → 1440p", () => doViewerUpscale(img, { resolution: "1440p" })),
+          ctxItem("⤢", "Upscale → 2160p", () => doViewerUpscale(img, { resolution: "2160p" })),
         );
         const r = anchor.getBoundingClientRect();
         ctxMenu.style.left = Math.min(r.left, window.innerWidth - 200) + "px";
-        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 152) + "px";
+        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 118) + "px";
         ctxMenu.style.display = "flex";
         document.addEventListener("pointerdown", ctxDoc, true);
       }
@@ -2644,16 +2630,12 @@ app.registerExtension({
       };
       // Current pill selection as a job-scale descriptor (snapshotted per job
       // so a mid-run pill change can't retarget queued work).
-      const upScaleSel = () => S.up.mode === "factor"
-        ? { mode: "factor", factor: S.up.factor }
-        : { mode: "target", resolution: S.up.resolution };
+      const upScaleSel = () => ({ resolution: S.up.resolution });
       function buildUpscalePrompt(tpl, o) {
         const p = JSON.parse(JSON.stringify(tpl));
         p["K2U:load"].inputs.image = o.imageName;
-        const u = p["K2U:up"].inputs;
-        u.upscale_mode = o.scale.mode;
-        if (o.scale.mode === "factor") u.upscale_factor = o.scale.factor;
-        else u.target_resolution = o.scale.resolution;
+        const u = p["K2U:up"].inputs;   // template pins upscale_mode "target"
+        u.target_resolution = o.scale.resolution;
         u.noise_scale = S.up.noise;
         // Folder-batch jobs force SaveImage (unattended results must land on
         // disk for the copy-back); viewer upscales respect auto-save.
