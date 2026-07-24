@@ -1485,9 +1485,12 @@ app.registerExtension({
       // Two identically-fitted images; the AFTER is clipped at the divider so
       // left = before, right = after. Drag the divider handle to sweep.
       const cmpWrap = mk("div", { position: "absolute", inset: "0", display: "none", background: "#000", zIndex: "4" });
+      // Both images occupy the IDENTICAL full-panel rect and let object-fit
+      // scale the pixels (max-* would refuse to scale the smaller BEFORE up,
+      // giving the two different geometries and a drifting divider).
       const cmpImgCss = {
-        position: "absolute", inset: "0", margin: "auto",
-        maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+        position: "absolute", inset: "0", width: "100%", height: "100%",
+        objectFit: "contain",
       };
       const cmpBefore = mk("img", { ...cmpImgCss }, { draggable: false });
       const cmpAfter = mk("img", { ...cmpImgCss }, { draggable: false });
