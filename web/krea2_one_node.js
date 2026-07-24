@@ -509,13 +509,16 @@ if (!window.__krea2_listeners) {
       } else if (nodeId === "K2U:up") {
         // fal API node — if it reports progress at all, show a single-stage bar.
         a.setStage?.(`Upscaling · ${d.value}/${d.max}`, (d.value / d.max) * 100);
+      } else if (nodeId === "K2E:sampler") {
+        // Edit: single KSampler — single-stage bar.
+        a.setStage?.(`Editing · Step ${d.value}/${d.max}`, (d.value / d.max) * 100);
       } else {
         a.setStage?.("Finishing…", null);
       }
     }
     const bjob = _batchJob(evt);
     if (bjob) {
-      if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · ${bjob.up ? "Upscaling" : "Sampling"} ${d.value}/${d.max}`);
+      if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · ${bjob.up ? "Upscaling" : bjob.edit ? "Editing" : "Sampling"} ${d.value}/${d.max}`);
       return;
     }
     const job = _sceneJob(evt);
@@ -539,9 +542,10 @@ if (!window.__krea2_listeners) {
       // thumb strip across jobs instead of replacing it per job.
       const br = a.S._batchRun;
       br.images.push(...imgs);
-      // Upscale jobs: remember the before/after pair for the compare view,
-      // and copy folder-batch results back next to their source.
-      if (bjob.up && bjob.before) a.registerCompare?.(imgs[0], bjob.before);
+      // Upscale/edit jobs: remember the before/after pair for the compare
+      // view, and copy folder-batch results back next to their source.
+      if ((bjob.up || bjob.edit) && bjob.before)
+        a.registerCompare?.(imgs[0], bjob.before, bjob.edit ? "edit" : "up");
       if (bjob.copyTo) {
         api.fetchApi("/krea2_onenode/copy_result", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -1518,7 +1522,7 @@ app.registerExtension({
       };
       genBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        S.tab === "scene" ? doRunScene() : S.tab === "upscale" ? doRunUpscaleBatch() : doGenerate();
+        S.tab === "scene" ? doRunScene() : S.tab === "upscale" ? doRunUpscaleBatch() : S.tab === "edit" ? doRunEdit() : doGenerate();
       });
       noDrag(genBtn);
 
@@ -1976,6 +1980,7 @@ app.registerExtension({
       // values begin there, not at 0 — the handler rebases with it).
       function currentProgPlan() {
         if (S.tab === "upscale") return { split: 1, p2Start: 0 };  // single stage
+        if (S.tab === "edit") return { split: 1, p2Start: 0 };     // single KSampler
         if (S.tab === "t2iq") {
           const p1 = S.q.p1Steps, p2 = Math.max(1, Math.ceil(S.q.denoise * 8));
           return { split: p1 / (p1 + p2), p2Start: 0 };
@@ -2216,9 +2221,11 @@ app.registerExtension({
       // Before-image registry for upscaled results — drives the compare view.
       const cmpKey = (img) => `${img.filename}|${img.subfolder || ""}|${img.type || "output"}`;
       S._cmp = new Map();
-      function registerCompare(after, before) {
+      S._pfx = new Map();   // cmpKey → save_temp prefix ("up" | "edit")
+      function registerCompare(after, before, pfx = "up") {
         S._cmp.set(cmpKey(after), before);
-        S._cmpOn = true;   // fresh upscale pops up in compare mode
+        S._pfx.set(cmpKey(after), pfx);   // save_temp prefix for this result
+        S._cmpOn = true;   // fresh upscale/edit pops up in compare mode
       }
       let _gallery = [];   // images last passed to showBatch (lightbox nav + selection)
       function showImage(img) {
@@ -2596,7 +2603,7 @@ app.registerExtension({
       }
 
       // ── template patch + submit ────────────────────────────────────────────
-      const _templates = {};   // "generate" (T2I/Scene) | "quality" (T2I HQ)
+      const _templates = {};   // "generate" (T2I/Scene) | "quality" (T2I HQ) | "upscale" | "edit"
       async function getTemplate(which = "generate") {
         if (!_templates[which]) {
           const r = await api.fetchApi(`/krea2_onenode/workflow_${which}`);
@@ -2897,6 +2904,159 @@ app.registerExtension({
           before: { filename: ud.name, subfolder: sub, type: "input" },
         };
       }
+      // ── edit submits (EDIT tab) ────────────────────────────────────────────
+      // Template patch for K2E:*. The template ships as a superset of both
+      // source workflows; the branch the current mode doesn't use is deleted
+      // (same pattern as the HQ post-section toggles). Mask and reference are
+      // mutually exclusive by UI construction.
+      function buildEditPrompt(tpl, o) {
+        const p = JSON.parse(JSON.stringify(tpl));
+        const d = editDims();
+        p["K2E:unet"].inputs.unet_name = S.modelUnet;
+        p["K2E:clip"].inputs.clip_name = S.modelClip;
+        p["K2E:vae"].inputs.vae_name = S.modelVae;
+        // K2E:idlora (identity-edit LoRA) stays hardwired; user rows stack on top.
+        let li = 1;
+        for (const row of S.loras) {
+          if (!row.name) continue;
+          p["K2E:lora"].inputs[`lora_${li}`] = {
+            on: !!row.on, lora: row.name, strength: row.strength, strengthTwo: null,
+          };
+          li++;
+        }
+        p["K2E:img"].inputs.image = o.srcName;
+        p["K2E:pos"].inputs.prompt = S.prompt || "";
+        p["K2E:pos"].inputs.grounding_px = S.edit.groundingPx;
+        p["K2E:neg"].inputs.grounding_px = S.edit.groundingPx;
+        // Output latent + source/mask resize all get the SAME exact dims so a
+        // masked composite aligns pixel-perfect with the resized original.
+        p["K2E:latent"].inputs.width = d.w;
+        p["K2E:latent"].inputs.height = d.h;
+        p["K2E:resize"].inputs["resize_type.width"] = d.w;
+        p["K2E:resize"].inputs["resize_type.height"] = d.h;
+        const pt = p["K2E:patch"].inputs;
+        pt.ref_boost = S.edit.refBoost;
+        pt.ref_boost_a = S.edit.refBoostA;
+        pt.fit_mode = S.edit.fitMode;
+        const k = p["K2E:sampler"].inputs;
+        k.seed = o.seed;
+        k.steps = S.edit.steps;
+        k.cfg = S.edit.cfg;
+        k.sampler_name = S.edit.sampler;
+        k.scheduler = S.edit.scheduler;
+        k.denoise = S.edit.denoise;
+        if (S.edit.mode === "mask") {
+          p["K2E:mask"].inputs.image = o.maskName;
+          p["K2E:mresize"].inputs["resize_type.width"] = d.w;
+          p["K2E:mresize"].inputs["resize_type.height"] = d.h;
+          p["K2E:grow"].inputs.expand = S.edit.growPx;
+          p["K2E:blur"].inputs.blur_radius = S.edit.blurRad;
+          // save ← composite (template default) — composite only, by design
+        } else {
+          for (const kk of ["mask", "mresize", "grow", "m2i", "blur", "i2m", "comp"]) delete p["K2E:" + kk];
+          delete pt.ref_boost_mask;
+          p["K2E:save"].inputs.images = ["K2E:decode", 0];
+        }
+        if (S.edit.mode === "ref") {
+          p["K2E:imgb"].inputs.image = o.refName;
+        } else {
+          for (const kk of ["imgb", "resizeb", "encb"]) delete p["K2E:" + kk];
+          delete pt.source_latent_b;
+          delete pt.source_image_b;
+          delete p["K2E:pos"].inputs.image_b;
+          delete p["K2E:neg"].inputs.image_b;
+        }
+        if (!S.autoSave && !o.forceSave) {
+          p["K2E:save"] = {
+            inputs: { images: p["K2E:save"].inputs.images },
+            class_type: "PreviewImage",
+            _meta: { title: "Preview (unsaved)" },
+          };
+        }
+        return p;
+      }
+      async function doRunEdit() {
+        if (S._submitting) return;
+        if (S._scene) { setStatus("Can't edit during a scene run.", C.err); return; }
+        const src = S._editSrc;
+        if (!src) { setStatus("Pick a source image first.", C.err); return; }
+        if (!S.prompt.trim()) { setStatus("Enter an edit instruction first.", C.err); return; }
+        if (S.edit.mode === "mask" && !S._editMask) { setStatus("Paint a mask first (or turn Mask off).", C.err); return; }
+        if (S.edit.mode === "ref" && !S._editRef) { setStatus("Pick a person image first (or turn Reference off).", C.err); return; }
+        const d = editDims();
+        if (!d) { setStatus("Couldn't read the source image size.", C.err); return; }
+        S._submitting = true;
+        try {
+          // Stage inputs once per click — every batch job reuses them.
+          let srcName, before;
+          if (src.kind === "file") {
+            setStatus("Uploading source…");
+            ({ imageName: srcName, before } = await uploadSource(src.file));
+          } else {
+            srcName = annotatedName(src.img);
+            before = src.img;
+          }
+          let maskName = null;
+          if (S.edit.mode === "mask") {
+            setStatus("Uploading mask…");
+            const mf = new File([S._editMask.blob], `k2e_mask_${Date.now()}.png`, { type: "image/png" });
+            ({ imageName: maskName } = await uploadSource(mf));
+          }
+          let refName = null;
+          if (S.edit.mode === "ref") {
+            const ref = S._editRef;
+            if (ref.kind === "file") {
+              setStatus("Uploading person image…");
+              ({ imageName: refName } = await uploadSource(ref.file));
+            } else {
+              refName = annotatedName(ref.img);
+            }
+          }
+          const tpl = await getTemplate("edit");
+          const first = startBatchRun();
+          const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+          S.lastSeed = base;
+          if (S.randomizeSeed) { S.seed = base; seedIn.value = base; }
+          syncSeedUI();
+          persist();
+          const br = S._batchRun;
+          let failed = null;
+          for (let i = 0; i < S.batch; i++) {
+            const prompt = buildEditPrompt(tpl, { seed: base + i, srcName, maskName, refName });
+            const resp = await api.fetchApi("/prompt", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+            });
+            const result = await resp.json();
+            if (!resp.ok || result.error) {
+              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+              failed = { msg: nodeErrs || msg };
+              break;   // rest of this click's jobs would fail identically
+            }
+            br.jobs.set(result.prompt_id, { seq: br.total + 1, edit: true, before });
+            br.total++;
+          }
+          if (first && !br.total) {
+            S._batchRun = null;
+            throw new Error(failed ? failed.msg : "failed to queue");
+          }
+          syncQueueUI();
+          const pending = br.total - br.done;
+          setStatus(failed
+            ? `Queue error: ${failed.msg}`
+            : pending > 1 ? `${pending} in queue` : "Editing…",
+            failed ? C.warn : C.text);
+        } catch (e) {
+          finishGenerate();
+          setStatus(`Error: ${e.message}`, C.err);
+          console.error("[Krea2OneNode] edit submit failed:", e);
+        } finally {
+          S._submitting = false;
+        }
+      }
+
       async function doRunUpscaleBatch() {
         if (S._submitting) return;
         if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
@@ -3061,19 +3221,23 @@ app.registerExtension({
       async function doSaveTemp() {
         const img = S.lastImage;
         if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save."); return; }
-        const pair = S._cmp.get(cmpKey(img));   // upscale results save as up_*
+        const pair = S._cmp.get(cmpKey(img));   // upscale saves as up_*, edits as edit_*
+        const pfx = S._pfx.get(cmpKey(img));
         try {
           const r = await api.fetchApi("/krea2_onenode/save_temp", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               filename: img.filename, subfolder: img.subfolder || "",
-              ...(pair ? { prefix: "up" } : {}),
+              ...(pair ? { prefix: pfx || "up" } : {}),
             }),
           });
           const d = await r.json();
           if (d.ok) {
             S.lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
-            if (pair) S._cmp.set(cmpKey(S.lastImage), pair);  // keep compare after the identity change
+            if (pair) {  // keep compare after the identity change
+              S._cmp.set(cmpKey(S.lastImage), pair);
+              if (pfx) S._pfx.set(cmpKey(S.lastImage), pfx);
+            }
             saveChip.style.display = "none";
             setStatus(`Saved as ${d.filename}`, C.ok);
           } else setStatus(`Save failed: ${d.error}`, C.err);
