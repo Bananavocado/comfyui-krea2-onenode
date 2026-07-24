@@ -1894,6 +1894,179 @@ app.registerExtension({
         }
       }
 
+      // ── mask painter (EDIT tab, mask mode) ─────────────────────────────────
+      // Full-panel overlay: the source image fitted, a display canvas on top
+      // rendering the painted region as a red wash. Strokes land on an
+      // offscreen mask canvas at the source's NATIVE resolution; Done exports
+      // a PNG whose painted pixels are transparent (LoadImage MASK = 1−alpha,
+      // the clipspace convention) and keeps the canvas for repainting.
+      const mpWrap = mk("div", {
+        position: "absolute", inset: "0", display: "none", flexDirection: "column",
+        background: "#000", zIndex: "8",
+      });
+      const mpStage = mk("div", {
+        flex: "1", minHeight: "0", position: "relative",
+        display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden",
+      });
+      const mpCanvas = mk("canvas", { touchAction: "none", cursor: "crosshair" });
+      mpStage.appendChild(mpCanvas);
+      const mpBar = mk("div", {
+        display: "flex", alignItems: "center", gap: "6px", padding: "8px",
+        background: "rgba(8,8,8,.9)", borderTop: "1px solid rgba(255,255,255,.08)",
+        flexShrink: "0",
+      });
+      let mpErase = false;
+      const mpBrushPill = Pill("✎ BRUSH", true, () => { mpErase = false; mpSyncTools(); });
+      const mpErasePill = Pill("◌ ERASE", false, () => { mpErase = true; mpSyncTools(); });
+      function mpSyncTools() {
+        setPillActive(mpBrushPill, !mpErase);
+        setPillActive(mpErasePill, mpErase);
+      }
+      S._mpBrush = 40;
+      const mpSize = DragNI(S._mpBrush, 4, 256, 4, v => { S._mpBrush = v; }, "44px");
+      mpSize.title = "Brush size (drag to scrub)";
+      const mpClearBtn = TBtn("Clear", () => {
+        if (mp.mctx) { mp.mctx.clearRect(0, 0, mp.w, mp.h); mp.painted = false; mpRender(); }
+      });
+      const mpCancelBtn = TBtn("Cancel", () => closeMaskPainter(false));
+      const mpDoneChip = LimeChip("Done", () => closeMaskPainter(true));
+      const mpHint = tx(mk("div", { fontSize: "9px", color: C.muted, flex: "1", textAlign: "center" }),
+        "paint the area the edit may change");
+      mpBar.append(mpBrushPill, mpErasePill,
+        tx(mk("span", { fontSize: "9px", fontWeight: "700", color: C.muted }), "SIZE"), mpSize,
+        mpClearBtn, mpHint, mpCancelBtn, mpDoneChip);
+      mpWrap.append(mpStage, mpBar);
+      right.appendChild(mpWrap);
+
+      const mp = { img: null, mctx: null, tctx: null, w: 0, h: 0, open: false, raf: 0, painted: false };
+      function mpRender() {
+        if (mp.raf) return;
+        mp.raf = requestAnimationFrame(() => {
+          mp.raf = 0;
+          const ctx = mpCanvas.getContext("2d");
+          ctx.clearRect(0, 0, mpCanvas.width, mpCanvas.height);
+          ctx.drawImage(mp.img, 0, 0, mpCanvas.width, mpCanvas.height);
+          // tint = mask silhouette filled red, composited at 45 %
+          mp.tctx.clearRect(0, 0, mp.w, mp.h);
+          mp.tctx.globalCompositeOperation = "source-over";
+          mp.tctx.drawImage(mp.mctx.canvas, 0, 0);
+          mp.tctx.globalCompositeOperation = "source-in";
+          mp.tctx.fillStyle = "#ff2b2b";
+          mp.tctx.fillRect(0, 0, mp.w, mp.h);
+          ctx.globalAlpha = 0.45;
+          ctx.drawImage(mp.tctx.canvas, 0, 0, mpCanvas.width, mpCanvas.height);
+          ctx.globalAlpha = 1;
+        });
+      }
+      // Screen → native-mask coords via the canvas rect (zoom-independent).
+      function mpPoint(e) {
+        const r = mpCanvas.getBoundingClientRect();
+        return {
+          x: ((e.clientX - r.left) / r.width) * mp.w,
+          y: ((e.clientY - r.top) / r.height) * mp.h,
+          k: mp.w / r.width,   // screen px → native px factor (for brush size)
+        };
+      }
+      let mpStroke = null;
+      mpCanvas.addEventListener("pointerdown", (e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (!mp.open) return;
+        try { mpCanvas.setPointerCapture(e.pointerId); } catch (err) {}
+        const pt = mpPoint(e);
+        mpStroke = { id: e.pointerId, last: pt };
+        mpDab(pt, pt);
+      });
+      mpCanvas.addEventListener("pointermove", (e) => {
+        if (!mpStroke || e.pointerId !== mpStroke.id) return;
+        const pt = mpPoint(e);
+        mpDab(mpStroke.last, pt);
+        mpStroke.last = pt;
+      });
+      const mpStrokeEnd = (e) => {
+        if (!mpStroke || e.pointerId !== mpStroke.id) return;
+        try { mpCanvas.releasePointerCapture(e.pointerId); } catch (err) {}
+        mpStroke = null;
+      };
+      mpCanvas.addEventListener("pointerup", mpStrokeEnd);
+      mpCanvas.addEventListener("pointercancel", mpStrokeEnd);
+      function mpDab(a, b) {
+        const c = mp.mctx;
+        c.globalCompositeOperation = mpErase ? "destination-out" : "source-over";
+        c.strokeStyle = "#fff";
+        c.lineWidth = Math.max(1, S._mpBrush * a.k);
+        c.lineCap = "round";
+        c.lineJoin = "round";
+        c.beginPath();
+        c.moveTo(a.x, a.y);
+        c.lineTo(b.x + 0.01, b.y + 0.01);   // dot on click without movement
+        c.stroke();
+        if (!mpErase) mp.painted = true;
+        mpRender();
+      }
+      const mpKey = (e) => {
+        if (e.key === "Escape") { e.stopPropagation(); closeMaskPainter(false); }
+      };
+      function openMaskPainter() {
+        const src = S._editSrc;
+        if (!src) { setStatus("Pick a source image first.", C.err); return; }
+        const im = new Image();
+        im.onload = () => {
+          mp.img = im;
+          mp.w = im.naturalWidth;
+          mp.h = im.naturalHeight;
+          // fit the display canvas into the stage
+          const sr = mpStage.getBoundingClientRect();
+          let sc = 1;
+          try { sc = app.canvas?.ds?.scale || 1; } catch (e) {}
+          const availW = Math.max(64, sr.width / sc - 16), availH = Math.max(64, sr.height / sc - 16);
+          const f = Math.min(availW / mp.w, availH / mp.h, 1);
+          mpCanvas.width = Math.max(1, Math.round(mp.w * f));
+          mpCanvas.height = Math.max(1, Math.round(mp.h * f));
+          mpCanvas.style.width = mpCanvas.width + "px";
+          mpCanvas.style.height = mpCanvas.height + "px";
+          const mc = document.createElement("canvas");
+          mc.width = mp.w; mc.height = mp.h;
+          mp.mctx = mc.getContext("2d");
+          const tc = document.createElement("canvas");
+          tc.width = mp.w; tc.height = mp.h;
+          mp.tctx = tc.getContext("2d");
+          // repaint: restore the previous mask canvas for this source
+          const prev = S._editMask;
+          mp.painted = !!(prev?.canvas && prev.w === mp.w && prev.h === mp.h);
+          if (mp.painted) mp.mctx.drawImage(prev.canvas, 0, 0);
+          mp.open = true;
+          mpErase = false;
+          mpSyncTools();
+          mpWrap.style.display = "flex";
+          document.addEventListener("keydown", mpKey, true);
+          mpRender();
+        };
+        im.onerror = () => setStatus("Couldn't load the source image.", C.err);
+        im.src = src.url || viewUrl(src.img);
+      }
+      function closeMaskPainter(commit) {
+        if (!mp.open) return;
+        mp.open = false;
+        document.removeEventListener("keydown", mpKey, true);
+        mpWrap.style.display = "none";
+        if (!commit) { syncEditUI(); return; }
+        // Export: opaque black, painted region punched to alpha 0.
+        const out = document.createElement("canvas");
+        out.width = mp.w; out.height = mp.h;
+        const octx = out.getContext("2d");
+        octx.fillStyle = "#000";
+        octx.fillRect(0, 0, mp.w, mp.h);
+        octx.globalCompositeOperation = "destination-out";
+        octx.drawImage(mp.mctx.canvas, 0, 0);
+        out.toBlob((blob) => {
+          // nothing painted → no mask (mp.painted tracks brush strokes)
+          S._editMask = mp.painted && blob
+            ? { blob, canvas: mp.mctx.canvas, w: mp.w, h: mp.h }
+            : null;
+          syncEditUI();
+        }, "image/png");
+      }
+
       const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
       const cmpChip = DarkChip("◧ Compare", () => toggleCompare());
       cmpChip.style.display = "none";
