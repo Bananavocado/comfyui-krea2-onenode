@@ -81,7 +81,16 @@ function defaultState() {
     // Upscale tab (SeedVR2 via fal.ai API — paid per call): fixed target
     // resolution; noise 0.1 = node default.
     up: { resolution: "2160p", noise: 0.1, folder: null },
-    tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale"
+    // Edit tab (Krea2 Edit / identity-edit): mode "none" = plain I2I edit,
+    // "mask" = painted-region edit, "ref" = two-image person-into-scene.
+    // Defaults mirror the source workflows (ref_boost 4 = fidelity preset).
+    edit: {
+      mode: "none", mp: 1,
+      refBoost: 4, refBoostA: 1, fitMode: "fit", groundingPx: 768,
+      steps: 10, cfg: 1, sampler: "euler", scheduler: "simple", denoise: 1,
+      growPx: 8, blurRad: 6,
+    },
+    tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale" | "edit"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
 }
@@ -101,7 +110,10 @@ function loadState() {
     // Stale keys from earlier upscaler iterations (4x UltraSharpV2 / factor mode).
     delete s.up.model; delete s.up.blend; delete s.up.mode; delete s.up.factor;
     if (!["1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
-    if (!["t2i", "t2iq", "scene", "upscale"].includes(s.tab)) s.tab = "t2i";
+    s.edit = Object.assign(defaultState().edit, s.edit || {});
+    if (!["none", "mask", "ref"].includes(s.edit.mode)) s.edit.mode = "none";
+    if (![1, 1.5, 2.25].includes(s.edit.mp)) s.edit.mp = 1;
+    if (!["t2i", "t2iq", "scene", "upscale", "edit"].includes(s.tab)) s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
       prompt: typeof r?.prompt === "string" ? r.prompt : "",
@@ -778,15 +790,16 @@ app.registerExtension({
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
-      let pillT2I, pillQ, pillScene, pillUp;
+      let pillT2I, pillQ, pillScene, pillUp, pillEdit;
       for (const m of MODES) {
-        const enabled = m === "T2I" || m === "UPSCALE";
+        const enabled = m === "T2I" || m === "UPSCALE" || m === "EDIT";
         const p = Pill(m,
-          (m === "T2I" && S.tab === "t2i") || (m === "UPSCALE" && S.tab === "upscale"),
-          m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : () => {},
+          (m === "T2I" && S.tab === "t2i") || (m === "UPSCALE" && S.tab === "upscale") || (m === "EDIT" && S.tab === "edit"),
+          m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : m === "EDIT" ? () => setTab("edit") : () => {},
           !enabled);
         if (!enabled) p.title = `${m} — coming in a later phase`;
         if (m === "UPSCALE") { pillUp = p; p.title = "Upscale — SeedVR2 (fal.ai API, paid) folder batch"; }
+        if (m === "EDIT") { pillEdit = p; p.title = "Edit — instruction-driven image editing (mask / reference)"; }
         toolbar.appendChild(p);
         if (m === "T2I") {
           pillT2I = p;
@@ -1023,6 +1036,172 @@ app.registerExtension({
       }
       left.appendChild(upBox);
       if (S.up.folder) refreshUpFolder(); else syncUpSource();
+
+      // ── EDIT tab: source/person wells, mode pills, output size ─────────────
+      // Sources are runtime-only (S._editSrc / S._editRef): File objects and
+      // /view refs don't survive persistence. kind "file" = local pick/drop
+      // (uploaded at submit), kind "view" = a result sent via "Use as…"
+      // (fed to LoadImage as an annotated name, no upload).
+      const editBox = mk("div", { display: "none", flexDirection: "column", gap: "8px" });
+
+      // Single-image well (drop / click). getVal/setVal close over the slot.
+      function imageWell(capTxt, getVal, setVal, emptyMain) {
+        const wrap = mk("div", { display: "flex", flexDirection: "column", gap: "4px" });
+        const wcap = cap(capTxt); wcap.style.marginBottom = "0";
+        wrap.appendChild(wcap);
+        const fileInput = mk("input", { display: "none" },
+          { type: "file", accept: ".png,.jpg,.jpeg,.webp" });
+        const well = mk("div", {
+          border: `1.5px dashed ${C.borderH}`, borderRadius: "10px",
+          padding: "10px", textAlign: "center", cursor: "pointer", position: "relative",
+          boxSizing: "border-box", userSelect: "none", minHeight: "52px", overflow: "hidden",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          transition: "border-color .15s, background .15s",
+        });
+        const thumb = mk("img", {
+          maxWidth: "100%", maxHeight: "110px", borderRadius: "6px",
+          display: "none", pointerEvents: "none",
+        }, { draggable: false });
+        const mainL = tx(mk("div", { fontSize: "10px", fontWeight: "700", color: C.text, pointerEvents: "none" }), emptyMain);
+        const subL = tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "3px", pointerEvents: "none" }), "drop an image or click to browse");
+        const nameL = mk("div", {
+          fontSize: "9px", color: "rgba(240,255,65,.7)", marginTop: "4px", pointerEvents: "none",
+          maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        });
+        const clr = mk("button", {
+          position: "absolute", top: "4px", right: "6px", background: "rgba(8,8,8,.6)",
+          border: "none", cursor: "pointer", color: C.muted, fontSize: "12px",
+          outline: "none", display: "none", padding: "2px 4px", borderRadius: "4px", zIndex: "2",
+        }, { title: "Clear image" });
+        tx(clr, "✕");
+        clr.onmouseenter = () => clr.style.color = C.err;
+        clr.onmouseleave = () => clr.style.color = C.muted;
+        clr.onclick = (e) => { e.stopPropagation(); setVal(null); syncEditUI(); };
+        well.append(thumb, mainL, subL, nameL, clr, fileInput);
+        const setFromFile = (f) => {
+          if (!f || !IMG_RE.test(f.name)) { setStatus("PNG / JPG / WebP only.", C.err); return; }
+          const url = URL.createObjectURL(f);
+          const im = new Image();
+          im.onload = () => {
+            setVal({ kind: "file", file: f, name: f.name, w: im.naturalWidth, h: im.naturalHeight, url });
+            syncEditUI();
+          };
+          im.onerror = () => { URL.revokeObjectURL(url); setStatus("Couldn't read that image.", C.err); };
+          im.src = url;
+        };
+        well.onclick = () => fileInput.click();
+        fileInput.onchange = () => { setFromFile(fileInput.files?.[0]); fileInput.value = ""; };
+        well.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); well.style.borderColor = LIME; well.style.background = "rgba(240,255,65,.05)"; });
+        well.addEventListener("dragleave", () => { well.style.borderColor = C.borderH; well.style.background = "transparent"; });
+        well.addEventListener("drop", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          well.style.borderColor = C.borderH; well.style.background = "transparent";
+          setFromFile(e.dataTransfer?.files?.[0]);
+        });
+        wrap._sync = () => {
+          const v = getVal();
+          const has = !!v;
+          thumb.style.display = has ? "" : "none";
+          if (has) thumb.src = v.url || viewUrl(v.img);
+          mainL.style.display = has ? "none" : "";
+          subL.style.display = has ? "none" : "";
+          clr.style.display = has ? "" : "none";
+          tx(nameL, has ? `${v.name || v.img?.filename || ""} · ${v.w || "?"}×${v.h || "?"}` : "");
+          nameL.style.display = has ? "" : "none";
+          well.style.borderStyle = has ? "solid" : "dashed";
+        };
+        wrap.appendChild(well);
+        return wrap;
+      }
+
+      // Changing the source invalidates any painted mask (it's aligned to it).
+      function setEditSource(v) {
+        const old = S._editSrc;
+        if (old?.url) URL.revokeObjectURL(old.url);
+        S._editSrc = v;
+        S._editMask = null;
+      }
+      function setEditRef(v) {
+        const old = S._editRef;
+        if (old?.url) URL.revokeObjectURL(old.url);
+        S._editRef = v;
+      }
+      const srcWell = imageWell("Source", () => S._editSrc, setEditSource, "Drop the image to edit");
+      editBox.appendChild(srcWell);
+
+      // Mode pills — mutually exclusive; click the active one to turn it off.
+      const editModeRow = mk("div", { display: "flex", gap: "5px" });
+      const mkModePill = (label, key, title) => {
+        const p = Pill(label, S.edit.mode === key, () => {
+          S.edit.mode = S.edit.mode === key ? "none" : key;
+          persist(); syncEditUI(); syncAdv();
+        });
+        p.title = title;
+        return p;
+      };
+      const maskPill = mkModePill("⬚ MASK", "mask", "Paint the editable region — everything else stays untouched");
+      const refPill = mkModePill("👤 REFERENCE", "ref", "Two-image edit: source = scene, person below = reference");
+      editModeRow.append(maskPill, refPill);
+      editBox.appendChild(editModeRow);
+
+      // Mask mode row: painter entry + status.
+      const editMaskRow = mk("div", { display: "none", alignItems: "center", gap: "6px" });
+      const paintChip = LimeChip("Paint mask…", () => openMaskPainter());
+      const editMaskStat = mk("div", {
+        fontSize: "9px", fontWeight: "700", color: C.muted, flex: "1", minWidth: "0",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      });
+      const maskClr = mk("button", {
+        background: "none", border: "none", cursor: "pointer", color: C.muted,
+        fontSize: "11px", outline: "none", padding: "2px", display: "none",
+      }, { title: "Clear painted mask" });
+      tx(maskClr, "✕");
+      maskClr.onclick = (e) => { e.stopPropagation(); S._editMask = null; syncEditUI(); };
+      editMaskRow.append(paintChip, editMaskStat, maskClr);
+      editBox.appendChild(editMaskRow);
+
+      // Reference mode: the person image (always image 2 — scene is image 1,
+      // the order rule from the identity workflow).
+      const refWell = imageWell("Person (reference)", () => S._editRef, setEditRef, "Drop the person to insert");
+      const refHint = tx(mk("div", { fontSize: "9px", color: C.muted, display: "none" }),
+        "source image = scene · this image = person");
+      editBox.append(refWell, refHint);
+
+      // Output size: auto — source aspect × MP target, /16 rounding.
+      const editOutRow = mk("div", { display: "flex", alignItems: "center", gap: "6px" });
+      const editOutCap = cap("Output"); editOutCap.style.marginBottom = "0";
+      const mpDD = DD(() => [1, 1.5, 2.25], S.edit.mp,
+        v => { S.edit.mp = v; persist(); syncEditUI(); },
+        v => `${v} MP${v === 1 ? " (recommended)" : ""}`);
+      const mpWrap = mk("div", { flex: "1", minWidth: "0" });
+      mpWrap.appendChild(mpDD);
+      editOutRow.append(editOutCap, mpWrap);
+      const editDimsTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
+      editBox.append(editOutRow, editDimsTxt);
+
+      function editDims() {
+        const s = S._editSrc;
+        if (!s?.w || !s?.h) return null;
+        const scale = Math.sqrt((S.edit.mp * 1e6) / (s.w * s.h));
+        const r16 = (v) => Math.max(64, Math.round((v * scale) / 16) * 16);
+        return { w: r16(s.w), h: r16(s.h) };
+      }
+      function syncEditUI() {
+        srcWell._sync();
+        refWell._sync();
+        setPillActive(maskPill, S.edit.mode === "mask");
+        setPillActive(refPill, S.edit.mode === "ref");
+        editMaskRow.style.display = S.edit.mode === "mask" ? "flex" : "none";
+        refWell.style.display = S.edit.mode === "ref" ? "flex" : "none";
+        refHint.style.display = S.edit.mode === "ref" ? "" : "none";
+        tx(editMaskStat, S._editMask ? "mask painted" : "no mask yet");
+        editMaskStat.style.color = S._editMask ? "rgba(240,255,65,.7)" : C.muted;
+        maskClr.style.display = S._editMask ? "" : "none";
+        const d = editDims();
+        tx(editDimsTxt, d ? `output ${d.w}×${d.h}` : "output — pick a source image");
+      }
+      left.appendChild(editBox);
+      syncEditUI();
 
       // SIZE — named preset dropdown + orientation toggle; W/H boxes only for
       // Custom. Presets store landscape base dims; "port" swaps them.
@@ -1531,27 +1710,30 @@ app.registerExtension({
       // Tab switching: one shared skeleton, scene swaps the T2I batch control,
       // prompt bar and Generate label for the prompt-list column + estimate.
       function syncTab() {
-        const scene = S.tab === "scene", up = S.tab === "upscale";
+        const scene = S.tab === "scene", up = S.tab === "upscale", ed = S.tab === "edit";
         setPillActive(pillT2I, S.tab === "t2i");
         setPillActive(pillQ, S.tab === "t2iq");
         setPillActive(pillScene, scene);
         setPillActive(pillUp, up);
+        setPillActive(pillEdit, ed);
         batchDD.style.display = scene || up ? "none" : "";
         sceneCol.style.display = scene ? "flex" : "none";
         promptWrap.style.display = scene || up ? "none" : "";
         estimateLine.style.display = scene ? "" : "none";
-        // Upscale tab swaps the generation controls for the source box.
+        // Upscale / Edit tabs swap the size controls for their own source box.
         upBox.style.display = up ? "flex" : "none";
-        sizeCap.style.display = up ? "none" : "";
-        sizeRow.style.display = up ? "none" : "flex";
-        finalTxt.style.display = up ? "none" : "";
+        editBox.style.display = ed ? "flex" : "none";
+        sizeCap.style.display = up || ed ? "none" : "";
+        sizeRow.style.display = up || ed ? "none" : "flex";
+        finalTxt.style.display = up || ed ? "none" : "";
         loraBox.style.display = up ? "none" : "flex";
-        if (up) whRow.style.display = "none";   // else syncSize() below decides
+        if (up || ed) whRow.style.display = "none";   // else syncSize() below decides
         if (!S._generating) {
-          tx(genBtn, scene ? "Run Scene" : up ? "Upscale" : "Generate");
+          tx(genBtn, scene ? "Run Scene" : up ? "Upscale" : ed ? "Edit" : "Generate");
           genBtn.appendChild(genSweep);
         }
         if (scene) updateEstimate();
+        if (ed) syncEditUI();
         syncAdv();
         syncSize();
       }
@@ -2612,7 +2794,7 @@ app.registerExtension({
         S._generating = false;
         timerStop();
         progIdle();
-        tx(genBtn, S.tab === "scene" ? "Run Scene" : S.tab === "upscale" ? "Upscale" : "Generate");
+        tx(genBtn, S.tab === "scene" ? "Run Scene" : S.tab === "upscale" ? "Upscale" : S.tab === "edit" ? "Edit" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
         genBtn.style.color = "#111";
