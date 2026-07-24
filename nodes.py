@@ -1,6 +1,7 @@
 import glob
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -62,6 +63,113 @@ PromptServer.instance.routes.get("/krea2_onenode/workflow_generate")(
 PromptServer.instance.routes.get("/krea2_onenode/workflow_quality")(
     _serve_json("workflows/quality_workflow.json"))
 
+PromptServer.instance.routes.get("/krea2_onenode/workflow_upscale")(
+    _serve_json("workflows/upscale_workflow.json"))
+
+
+# ---------------------------------------------------------------------------
+# Batch-upscale source folders
+# ---------------------------------------------------------------------------
+
+ALLOWED_SRC_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
+# Folders the user explicitly picked via the native dialog this server session.
+# list_folder / read_file / copy_result refuse anything outside them so these
+# routes never become an arbitrary-filesystem read/write primitive.
+_approved_dirs = set()
+
+
+def _approved_dir(path_str):
+    """Resolve a query path and return it only if it was picked this session."""
+    if not path_str:
+        return None
+    p = Path(path_str).expanduser().resolve()
+    return p if p in _approved_dirs else None
+
+
+@PromptServer.instance.routes.get("/krea2_onenode/pick_folder")
+async def pick_folder(request):
+    import platform
+    import subprocess
+    if platform.system() != "Darwin":
+        return web.json_response({"ok": False, "error": "native picker is macOS-only"})
+    script = ('tell application "System Events" to activate\n'
+              'POSIX path of (choose folder with prompt '
+              '"Choose a folder of images to upscale")')
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        return web.json_response({"ok": True, "cancelled": True})
+    if r.returncode != 0:  # user hit Cancel
+        return web.json_response({"ok": True, "cancelled": True})
+    p = Path(r.stdout.strip().rstrip("/")).resolve()
+    if not p.is_dir():
+        return web.json_response({"ok": False, "error": "not a folder"})
+    _approved_dirs.add(p)
+    return web.json_response({"ok": True, "path": str(p)})
+
+
+@PromptServer.instance.routes.get("/krea2_onenode/list_folder")
+async def list_folder(request):
+    p = _approved_dir(request.query.get("path", ""))
+    if not p:
+        return web.json_response({"ok": False, "unauthorized": True,
+                                  "error": "folder not authorized — choose it again"})
+    if not p.is_dir():
+        return web.json_response({"ok": False, "error": "folder not found"})
+    try:
+        files = sorted(f.name for f in p.iterdir()
+                       if f.is_file() and f.suffix.lower() in ALLOWED_SRC_EXT
+                       and not f.name.startswith("."))
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)})
+    return web.json_response({"ok": True, "files": files})
+
+
+@PromptServer.instance.routes.get("/krea2_onenode/read_file")
+async def read_file(request):
+    folder = _approved_dir(request.query.get("path", ""))
+    if not folder:
+        return web.json_response({"ok": False, "error": "folder not authorized"}, status=403)
+    name = request.query.get("name", "")
+    target = (folder / name).resolve()
+    if (target.parent != folder or target.suffix.lower() not in ALLOWED_SRC_EXT
+            or not target.is_file()):
+        return web.json_response({"ok": False, "error": "bad file"}, status=400)
+    return web.FileResponse(target)
+
+
+@PromptServer.instance.routes.post("/krea2_onenode/copy_result")
+async def copy_result(request):
+    """Copy a finished upscale (output or temp) into <source>/upscaled/."""
+    try:
+        data = await request.json()
+        src = _resolve_image_file(data.get("filename", ""), data.get("subfolder", ""),
+                                  data.get("type", "output") or "output")
+        if not src:
+            return web.json_response({"ok": False, "error": "result file not found"})
+        dest_dir = _approved_dir(str(data.get("dest_dir", "")))
+        if not dest_dir:
+            return web.json_response({"ok": False, "error": "folder not authorized"}, status=403)
+        dest_name = os.path.basename(str(data.get("dest_name", "")) or "up_result.png")
+        out_dir = dest_dir / "upscaled"
+        out_dir.mkdir(exist_ok=True)
+        stem = os.path.splitext(dest_name)[0]
+        # Keep the RESULT's real format (SaveImage writes .png even when the
+        # source was .jpg/.webp).
+        ext = os.path.splitext(src)[1] or ".png"
+        dest = out_dir / f"{stem}{ext}"
+        i = 1
+        while dest.exists():
+            dest = out_dir / f"{stem}-{i}{ext}"
+            i += 1
+        shutil.copy2(src, str(dest))
+        return web.json_response({"ok": True, "path": str(dest)})
+    except Exception as e:
+        print(f"[Krea2OneNode] copy_result error: {e}")
+        return web.json_response({"ok": False, "error": str(e)})
+
 
 def _scan_models(key):
     try:
@@ -79,6 +187,7 @@ async def get_models(request):
         "text_encoders": _scan_models("text_encoders"),
         "vaes": _scan_models("vae"),
         "loras": _scan_models("loras"),
+        "upscale_models": _scan_models("upscale_models"),
     })
 
 
@@ -90,6 +199,9 @@ async def save_temp(request):
         data = await request.json()
         temp_filename = data.get("filename", "")
         temp_subfolder = data.get("subfolder", "")
+        prefix = str(data.get("prefix", "") or "Krea2")
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", prefix):
+            prefix = "Krea2"
         if not temp_filename:
             return web.json_response({"ok": False, "error": "no filename"})
 
@@ -105,18 +217,18 @@ async def save_temp(request):
         dest_dir = os.path.join(_get_output_dir(), SUBFOLDER)
         os.makedirs(dest_dir, exist_ok=True)
         idx = 1
-        for f in glob.glob(os.path.join(dest_dir, "Krea2_*_.png")):
+        for f in glob.glob(os.path.join(dest_dir, f"{prefix}_*_.png")):
             try:
-                n = int(os.path.basename(f).split("_")[1])
+                n = int(os.path.basename(f)[len(prefix) + 1:].split("_")[0])
                 if n >= idx:
                     idx = n + 1
             except Exception:
                 pass
-        dest_name = f"Krea2_{idx:05d}_.png"
+        dest_name = f"{prefix}_{idx:05d}_.png"
         dest_path = os.path.join(dest_dir, dest_name)
         while os.path.exists(dest_path):
             idx += 1
-            dest_name = f"Krea2_{idx:05d}_.png"
+            dest_name = f"{prefix}_{idx:05d}_.png"
             dest_path = os.path.join(dest_dir, dest_name)
 
         shutil.copy2(str(src), dest_path)

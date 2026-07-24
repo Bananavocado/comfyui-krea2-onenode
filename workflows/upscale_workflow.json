@@ -1,0 +1,9 @@
+{
+  "K2U:load":  {"inputs": {"image": "example.png"}, "class_type": "LoadImage", "_meta": {"title": "Load Source"}},
+  "K2U:model": {"inputs": {"model_name": "4x-UltraSharpV2.safetensors"}, "class_type": "UpscaleModelLoader", "_meta": {"title": "Upscale Model"}},
+  "K2U:up":    {"inputs": {"upscale_model": ["K2U:model", 0], "image": ["K2U:load", 0]}, "class_type": "ImageUpscaleWithModel", "_meta": {"title": "Upscale 4x"}},
+  "K2U:scale": {"inputs": {"upscale_method": "lanczos", "scale_by": 0.5, "image": ["K2U:up", 0]}, "class_type": "ImageScaleBy", "_meta": {"title": "To Target Size"}},
+  "K2U:soft":  {"inputs": {"upscale_method": "bilinear", "scale_by": 2.0, "image": ["K2U:load", 0]}, "class_type": "ImageScaleBy", "_meta": {"title": "Soft Branch"}},
+  "K2U:blend": {"inputs": {"image1": ["K2U:scale", 0], "image2": ["K2U:soft", 0], "blend_factor": 0.65, "blend_mode": "normal"}, "class_type": "ImageBlend", "_meta": {"title": "Soften Blend"}},
+  "K2U:save":  {"inputs": {"filename_prefix": "krea2-onenode/up_", "images": ["K2U:blend", 0]}, "class_type": "SaveImage", "_meta": {"title": "Save"}}
+}
