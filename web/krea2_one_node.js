@@ -154,7 +154,15 @@ const noDrag = (e) => {
 if (!document.getElementById("krea2-onenode-css")) {
   const st = document.createElement("style");
   st.id = "krea2-onenode-css";
-  st.textContent = `@keyframes k2-light-sweep{0%{left:-80%;opacity:1}100%{left:130%;opacity:0}}`;
+  st.textContent = [
+    `@keyframes k2-light-sweep{0%{left:-80%;opacity:1}100%{left:130%;opacity:0}}`,
+    `@keyframes k2-thumb-in{from{opacity:0;transform:translateY(8px) scale(.92)}}`,
+    `@keyframes k2-lb-in{from{opacity:0}}`,
+    `.k2-thumbs::-webkit-scrollbar{height:5px}`,
+    `.k2-thumbs::-webkit-scrollbar-thumb{background:rgba(255,255,255,.18);border-radius:3px}`,
+    `.k2-thumbs::-webkit-scrollbar-track{background:transparent}`,
+    `@media (prefers-reduced-motion: reduce){.k2-lb,.k2-lb *,.k2-thumbs,.k2-thumbs *{animation:none!important;transition:none!important}}`,
+  ].join("\n");
   document.head.appendChild(st);
 }
 
@@ -1334,8 +1342,22 @@ app.registerExtension({
       });
       mainRow.appendChild(right);
 
-      const previewImg = mk("img", { maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none" });
+      const previewImg = mk("img", {
+        maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none",
+        cursor: "zoom-in",
+      }, { title: "Click to view full size", draggable: false });
       noDrag(previewImg);
+      // Full-size lightbox on click; guard the live b_preview blob (only a
+      // final /view image can be zoomed / revealed in Finder).
+      previewImg.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (S.lastImage?.filename && (previewImg.src || "").includes("/view")) openLightbox(S.lastImage);
+      });
+      previewImg.addEventListener("contextmenu", (e) => {
+        if (!S.lastImage?.filename) return;
+        e.preventDefault(); e.stopPropagation();
+        openCtxMenu(e, S.lastImage);
+      });
       previewImg.onerror = () => {
         // Restored image no longer on disk (e.g. temp cleared by a ComfyUI
         // restart) — fall back to the empty state instead of a broken icon.
@@ -1362,12 +1384,29 @@ app.registerExtension({
       overlayTR.append(clearChip, saveChip, useAsChip);
       right.appendChild(overlayTR);
 
+      // Thumb strip — frosted overlay bar: "n/total" counter + scrollable
+      // thumbnails. The selected thumb (the image in the preview) gets a lime
+      // ring, full opacity and a slight raise; the rest sit dimmed.
       const thumbStrip = mk("div", {
         position: "absolute", left: "8px", right: "8px", bottom: "8px",
-        display: "none", gap: "6px", overflowX: "auto", zIndex: "5",
-        padding: "4px", background: "rgba(10,10,10,.6)", borderRadius: "8px",
+        display: "none", alignItems: "center", gap: "4px", zIndex: "5",
+        padding: "5px 8px 5px 10px", background: "rgba(8,8,8,.72)",
+        backdropFilter: "blur(12px)", webkitBackdropFilter: "blur(12px)",
+        border: "1px solid rgba(255,255,255,.08)", borderRadius: "10px",
+        boxSizing: "border-box",
       });
-      scrollGuard(thumbStrip, true);
+      const thumbCounter = mk("div", {
+        flexShrink: "0", fontSize: "10px", fontWeight: "700", color: LIME,
+        fontVariantNumeric: "tabular-nums", letterSpacing: ".04em",
+        paddingRight: "8px", borderRight: "1px solid rgba(255,255,255,.1)",
+      });
+      const thumbScroller = mk("div", {
+        display: "flex", alignItems: "flex-end", gap: "7px", flex: "1", minWidth: "0",
+        overflowX: "auto", overflowY: "hidden", padding: "7px 2px 3px 8px",
+      });
+      thumbScroller.className = "k2-thumbs";
+      scrollGuard(thumbScroller, true);
+      thumbStrip.append(thumbCounter, thumbScroller);
       right.appendChild(thumbStrip);
 
       // Progress bar — overlaid at the bottom of the preview box, same design
@@ -1644,6 +1683,12 @@ app.registerExtension({
         const q = new URLSearchParams({ filename: img.filename, subfolder: img.subfolder || "", type: img.type || "output", t: Date.now() });
         return api.apiURL(`/view?${q}`);
       }
+      function imgEq(a, b) {
+        return !!a && !!b && a.filename === b.filename
+          && (a.subfolder || "") === (b.subfolder || "")
+          && (a.type || "output") === (b.type || "output");
+      }
+      let _gallery = [];   // images last passed to showBatch (lightbox nav + selection)
       function showImage(img) {
         S.lastImage = img;
         previewImg.src = viewUrl(img);
@@ -1652,19 +1697,332 @@ app.registerExtension({
         saveChip.style.display = img.type === "temp" ? "" : "none";
         clearChip.style.display = "";
         pushOutput(img);
+        syncThumbSel();
       }
       function showBatch(images) {
-        thumbStrip.replaceChildren();
-        if (images.length <= 1) { thumbStrip.style.display = "none"; return; }
+        _gallery = images.slice();
+        const prevCount = thumbScroller.childElementCount;
+        thumbScroller.replaceChildren();
+        if (images.length <= 1) { thumbStrip.style.display = "none"; lbSyncGallery(); return; }
         thumbStrip.style.display = "flex";
-        images.forEach((img) => {
-          const t = mk("img", {
-            height: "52px", borderRadius: "6px", cursor: "pointer",
-            border: `1px solid ${C.borderH}`,
-          }, { src: viewUrl(img) });
-          t.addEventListener("click", (e) => { e.stopPropagation(); showImage(img); });
-          thumbStrip.appendChild(noDrag(t));
+        images.forEach((img, i) => {
+          const w = mk("div", {
+            position: "relative", flexShrink: "0", borderRadius: "8px",
+            cursor: "pointer", lineHeight: "0", overflow: "hidden",
+            border: "1px solid rgba(255,255,255,.13)", opacity: ".55",
+            transition: "transform .18s cubic-bezier(.22,1,.36,1), box-shadow .18s ease, border-color .18s ease, opacity .18s ease",
+          });
+          // Only images fresh this rebuild animate in (the strip regrows on
+          // every finished job of a rolling queue).
+          if (i >= prevCount) w.style.animation = "k2-thumb-in .28s cubic-bezier(.22,1,.36,1)";
+          const im = mk("img", { height: "54px", display: "block", pointerEvents: "none" }, { src: viewUrl(img), draggable: false });
+          const num = mk("div", {
+            position: "absolute", top: "3px", left: "3px", fontSize: "8px",
+            fontWeight: "700", color: "rgba(255,255,255,.85)",
+            background: "rgba(0,0,0,.55)", borderRadius: "4px", padding: "1px 4px",
+            lineHeight: "1.4", pointerEvents: "none", fontVariantNumeric: "tabular-nums",
+          });
+          tx(num, String(i + 1));
+          w.append(im, num);
+          w._img = img;
+          w._num = num;
+          w.onmouseenter = () => { if (!w._sel) { w.style.opacity = "1"; w.style.transform = "translateY(-2px)"; } };
+          w.onmouseleave = () => { if (!w._sel) { w.style.opacity = ".55"; w.style.transform = ""; } };
+          w.addEventListener("click", (e) => { e.stopPropagation(); showImage(img); });
+          w.addEventListener("dblclick", (e) => { e.stopPropagation(); openLightbox(img); });
+          w.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); openCtxMenu(e, img); });
+          thumbScroller.appendChild(noDrag(w));
         });
+        syncThumbSel();
+        lbSyncGallery();
+      }
+      function syncThumbSel() {
+        const kids = [...thumbScroller.children];
+        if (!kids.length) return;
+        let selIdx = -1;
+        kids.forEach((w, i) => {
+          const sel = imgEq(w._img, S.lastImage);
+          w._sel = sel;
+          if (sel) selIdx = i;
+          w.style.opacity = sel ? "1" : ".55";
+          w.style.transform = sel ? "translateY(-3px)" : "";
+          w.style.borderColor = sel ? LIME : "rgba(255,255,255,.13)";
+          w.style.boxShadow = sel ? `0 0 0 1px ${LIME}, 0 4px 16px rgba(240,255,65,.28)` : "none";
+          w._num.style.background = sel ? LIME : "rgba(0,0,0,.55)";
+          w._num.style.color = sel ? "#111" : "rgba(255,255,255,.85)";
+        });
+        tx(thumbCounter, selIdx >= 0 ? `${selIdx + 1}/${kids.length}` : String(kids.length));
+        // Keep the selected thumb in view (rects are canvas-zoom scaled;
+        // scroll offsets aren't — divide the delta back out).
+        const w = kids[selIdx];
+        if (w) {
+          let sc = 1;
+          try { sc = app.canvas?.ds?.scale || 1; } catch (e) {}
+          const sr = thumbScroller.getBoundingClientRect(), wr = w.getBoundingClientRect();
+          if (wr.left < sr.left) thumbScroller.scrollBy({ left: (wr.left - sr.left - 24 * sc) / sc, behavior: "smooth" });
+          else if (wr.right > sr.right) thumbScroller.scrollBy({ left: (wr.right - sr.right + 24 * sc) / sc, behavior: "smooth" });
+        }
+      }
+
+      // ── context menu (preview + thumbs + lightbox): Open in Finder etc. ────
+      const ctxMenu = mk("div", {
+        position: "fixed", zIndex: "1000001", display: "none", flexDirection: "column",
+        background: C.bg1, border: `1px solid ${C.borderH}`, borderRadius: "8px",
+        boxShadow: "0 12px 32px rgba(0,0,0,.85)", overflow: "hidden", minWidth: "180px",
+        padding: "4px",
+        fontFamily: "'Inter','Segoe UI',system-ui,sans-serif",
+      });
+      document.body.appendChild(ctxMenu);
+      const closeCtx = () => { ctxMenu.style.display = "none"; document.removeEventListener("pointerdown", ctxDoc, true); };
+      const ctxDoc = (e) => { if (!ctxMenu.contains(e.target)) closeCtx(); };
+      function ctxItem(icon, label, onClick) {
+        const r = mk("div", {
+          display: "flex", alignItems: "center", gap: "8px",
+          padding: "7px 12px", fontSize: "11px", cursor: "pointer",
+          color: C.text, borderRadius: "5px", transition: "background .1s",
+          whiteSpace: "nowrap",
+        });
+        r.append(tx(mk("span", { fontSize: "11px", width: "14px", textAlign: "center", color: C.muted, flexShrink: "0" }), icon), tx(mk("span"), label));
+        r.onmouseenter = () => r.style.background = C.bg3;
+        r.onmouseleave = () => r.style.background = "transparent";
+        r.onclick = (e) => { e.stopPropagation(); closeCtx(); onClick(); };
+        return r;
+      }
+      function openCtxMenu(e, img) {
+        ctxMenu.replaceChildren(
+          ctxItem("⌘", "Open in Finder", () => revealInFinder(img)),
+          ctxItem("↗", "Open in new tab", () => window.open(viewUrl(img), "_blank")),
+        );
+        ctxMenu.style.left = Math.min(e.clientX, window.innerWidth - 200) + "px";
+        ctxMenu.style.top = Math.min(e.clientY, window.innerHeight - 84) + "px";
+        ctxMenu.style.display = "flex";
+        document.addEventListener("pointerdown", ctxDoc, true);
+      }
+      function revealInFinder(img) {
+        // Backend reveals the exact file (open -R); with no filename it opens
+        // the gallery output folder instead.
+        api.fetchApi("/krea2_onenode/open_folder", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(img || {}),
+        }).catch(() => {});
+      }
+
+      // ── lightbox: fullscreen viewer on document.body (escapes the canvas
+      // zoom transform). Scroll = zoom at cursor, drag = pan, double-click =
+      // fit ↔ 100%, ←/→ = prev/next, Esc / backdrop click = close. ──────────
+      const lb = mk("div", {
+        position: "fixed", inset: "0", zIndex: "1000000", display: "none",
+        background: "rgba(5,5,5,.96)", userSelect: "none",
+        fontFamily: "'Inter','Segoe UI',system-ui,sans-serif",
+      });
+      lb.className = "k2-lb";
+      document.body.appendChild(lb);
+      const lbStage = mk("div", { position: "absolute", inset: "0", overflow: "hidden", cursor: "grab" });
+      const lbImg = mk("img", {
+        position: "absolute", left: "0", top: "0", transformOrigin: "0 0",
+        willChange: "transform", display: "block", opacity: "0",
+        transition: "opacity .18s ease",
+      }, { draggable: false });
+      lbStage.appendChild(lbImg);
+      lb.appendChild(lbStage);
+
+      const lbState = { img: null, idx: -1, s: 1, x: 0, y: 0, fit: 1, natW: 0, natH: 0 };
+      const lbApply = () => {
+        lbImg.style.transform = `translate(${lbState.x}px, ${lbState.y}px) scale(${lbState.s})`;
+        tx(lbZoomPct, Math.round(lbState.s * 100) + "%");
+      };
+      function lbFit() {
+        const W = lbStage.clientWidth, H = lbStage.clientHeight;
+        if (!lbState.natW || !W) return;
+        const fit = Math.min(W / lbState.natW, H / lbState.natH, 1);
+        lbState.fit = fit;
+        lbState.s = fit;
+        lbState.x = (W - lbState.natW * fit) / 2;
+        lbState.y = (H - lbState.natH * fit) / 2;
+        lbApply();
+      }
+      function lbZoomTo(s2, cx, cy) {  // cx/cy in stage coords, anchor stays put
+        s2 = Math.min(8, Math.max(lbState.fit * 0.25, s2));
+        lbState.x = cx - (cx - lbState.x) * (s2 / lbState.s);
+        lbState.y = cy - (cy - lbState.y) * (s2 / lbState.s);
+        lbState.s = s2;
+        lbApply();
+      }
+      const lbZoomCenter = (f) => lbZoomTo(lbState.s * f, lbStage.clientWidth / 2, lbStage.clientHeight / 2);
+      lbStage.addEventListener("wheel", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const r = lbStage.getBoundingClientRect();
+        lbZoomTo(lbState.s * Math.exp(-e.deltaY * 0.002), e.clientX - r.left, e.clientY - r.top);
+      }, { passive: false });
+      let lbDrag = null;
+      lbStage.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        lbDrag = { x0: e.clientX, y0: e.clientY, sx: lbState.x, sy: lbState.y, id: e.pointerId, moved: false, onImg: e.target === lbImg };
+        try { lbStage.setPointerCapture(e.pointerId); } catch (err) {}
+        lbStage.style.cursor = "grabbing";
+      });
+      lbStage.addEventListener("pointermove", (e) => {
+        if (!lbDrag) return;
+        const dx = e.clientX - lbDrag.x0, dy = e.clientY - lbDrag.y0;
+        if (!lbDrag.moved && Math.hypot(dx, dy) < 4) return;
+        lbDrag.moved = true;
+        lbState.x = lbDrag.sx + dx;
+        lbState.y = lbDrag.sy + dy;
+        lbApply();
+      });
+      const lbDragEnd = (e) => {
+        if (!lbDrag) return;
+        const { moved, onImg, id } = lbDrag;
+        lbDrag = null;
+        try { lbStage.releasePointerCapture(id); } catch (err) {}
+        lbStage.style.cursor = "grab";
+        if (!moved && !onImg) closeLightbox();   // plain click on the backdrop
+      };
+      lbStage.addEventListener("pointerup", lbDragEnd);
+      lbStage.addEventListener("pointercancel", lbDragEnd);
+      lbStage.addEventListener("dblclick", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const r = lbStage.getBoundingClientRect();
+        if (lbState.s > lbState.fit * 1.01) lbFit();
+        else lbZoomTo(lbState.fit < 0.99 ? 1 : lbState.fit * 2, e.clientX - r.left, e.clientY - r.top);
+      });
+      lbImg.addEventListener("contextmenu", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        if (lbState.img) openCtxMenu(e, lbState.img);
+      });
+
+      // top bar: filename · counter · zoom controls · Finder · close
+      const lbBar = mk("div", {
+        position: "absolute", top: "0", left: "0", right: "0", zIndex: "3",
+        display: "flex", alignItems: "center", gap: "8px", padding: "12px 16px 22px",
+        background: "linear-gradient(rgba(0,0,0,.72), transparent)", pointerEvents: "none",
+      });
+      const lbName = mk("div", {
+        fontSize: "12px", fontWeight: "600", color: C.text, minWidth: "0",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      });
+      const lbCount = mk("div", {
+        fontSize: "11px", color: C.muted, flexShrink: "0",
+        fontVariantNumeric: "tabular-nums",
+      });
+      function lbBtn(label, title, onClick, wide) {
+        const b = mk("button", {
+          background: "rgba(255,255,255,.06)", border: "1px solid rgba(255,255,255,.14)",
+          borderRadius: "6px", padding: wide ? "5px 11px" : "5px 9px", cursor: "pointer",
+          color: C.text, fontSize: "11px", fontWeight: "600", outline: "none",
+          transition: "border-color .15s, background .15s", flexShrink: "0",
+          pointerEvents: "auto",
+        }, { title });
+        tx(b, label);
+        b.onmouseenter = () => { b.style.borderColor = "rgba(255,255,255,.4)"; b.style.background = "rgba(255,255,255,.1)"; };
+        b.onmouseleave = () => { b.style.borderColor = "rgba(255,255,255,.14)"; b.style.background = "rgba(255,255,255,.06)"; };
+        b.onclick = (e) => { e.stopPropagation(); onClick(); };
+        return b;
+      }
+      const lbZoomPct = mk("div", {
+        fontSize: "11px", color: C.muted, minWidth: "38px", textAlign: "center",
+        fontVariantNumeric: "tabular-nums", flexShrink: "0", cursor: "pointer",
+        pointerEvents: "auto",
+      }, { title: "Reset zoom to fit" });
+      lbZoomPct.onclick = () => lbFit();
+      lbBar.append(
+        lbName, lbCount, mk("div", { flex: "1" }),
+        lbBtn("−", "Zoom out", () => lbZoomCenter(0.8)),
+        lbZoomPct,
+        lbBtn("+", "Zoom in", () => lbZoomCenter(1.25)),
+        lbBtn("Fit", "Fit to screen (0)", () => lbFit(), true),
+        lbBtn("1:1", "Actual pixels (1)", () => { lbZoomTo(1, lbStage.clientWidth / 2, lbStage.clientHeight / 2); }, true),
+        lbBtn("⌘ Finder", "Reveal this file in Finder", () => { if (lbState.img) revealInFinder(lbState.img); }, true),
+        lbBtn("✕", "Close (Esc)", () => closeLightbox()),
+      );
+      lb.appendChild(lbBar);
+
+      // prev / next arrows (batch runs only)
+      function lbArrow(glyph, dir, side) {
+        const b = mk("button", {
+          position: "absolute", [side]: "16px", top: "50%", transform: "translateY(-50%)",
+          width: "40px", height: "40px", borderRadius: "50%", zIndex: "3",
+          background: "rgba(0,0,0,.5)", border: "1px solid rgba(255,255,255,.14)",
+          color: C.text, fontSize: "20px", lineHeight: "1", cursor: "pointer",
+          display: "none", alignItems: "center", justifyContent: "center",
+          outline: "none", transition: "border-color .15s, background .15s",
+        }, { title: dir < 0 ? "Previous (←)" : "Next (→)" });
+        tx(b, glyph);
+        b.onmouseenter = () => { b.style.borderColor = LIME; b.style.background = "rgba(0,0,0,.75)"; };
+        b.onmouseleave = () => { b.style.borderColor = "rgba(255,255,255,.14)"; b.style.background = "rgba(0,0,0,.5)"; };
+        b.onclick = (e) => { e.stopPropagation(); lbNav(dir); };
+        lb.appendChild(b);
+        return b;
+      }
+      const lbPrev = lbArrow("‹", -1, "left");
+      const lbNext = lbArrow("›", 1, "right");
+
+      const lbHint = mk("div", {
+        position: "absolute", bottom: "0", left: "0", right: "0", zIndex: "3",
+        textAlign: "center", padding: "22px 16px 12px", pointerEvents: "none",
+        fontSize: "10px", color: "rgba(255,255,255,.4)",
+        background: "linear-gradient(transparent, rgba(0,0,0,.6))",
+      });
+      tx(lbHint, "Scroll to zoom · Drag to pan · Double-click for 100% · Right-click for options");
+      lb.appendChild(lbHint);
+
+      function lbSyncGallery() {
+        // Called when the strip regrows mid-run so an open lightbox keeps an
+        // accurate counter / nav state.
+        if (lb.style.display === "none") return;
+        lbState.idx = _gallery.findIndex(g => imgEq(g, lbState.img));
+        tx(lbCount, _gallery.length > 1 && lbState.idx >= 0 ? `${lbState.idx + 1} / ${_gallery.length}` : "");
+        lbPrev.style.display = lbNext.style.display = _gallery.length > 1 ? "flex" : "none";
+      }
+      function lbLoad(img, idx) {
+        lbState.img = img;
+        lbState.idx = idx;
+        tx(lbName, (img.filename || "") + (img.type === "temp" ? " · unsaved" : ""));
+        tx(lbCount, _gallery.length > 1 && idx >= 0 ? `${idx + 1} / ${_gallery.length}` : "");
+        lbPrev.style.display = lbNext.style.display = _gallery.length > 1 ? "flex" : "none";
+        lbImg.style.opacity = "0";
+        lbImg.onload = () => {
+          lbState.natW = lbImg.naturalWidth;
+          lbState.natH = lbImg.naturalHeight;
+          lbImg.style.width = lbState.natW + "px";
+          lbImg.style.height = lbState.natH + "px";
+          lbFit();
+          lbImg.style.opacity = "1";
+        };
+        lbImg.src = viewUrl(img);
+      }
+      function lbNav(dir) {
+        if (_gallery.length < 2) return;
+        let i = lbState.idx < 0 ? 0 : (lbState.idx + dir + _gallery.length) % _gallery.length;
+        lbLoad(_gallery[i], i);
+        showImage(_gallery[i]);   // keep the main preview + thumb ring in sync
+      }
+      function lbKey(e) {
+        e.stopPropagation();
+        if (e.key === "Escape") closeLightbox();
+        else if (e.key === "ArrowLeft") lbNav(-1);
+        else if (e.key === "ArrowRight") lbNav(1);
+        else if (e.key === "+" || e.key === "=") lbZoomCenter(1.25);
+        else if (e.key === "-") lbZoomCenter(0.8);
+        else if (e.key === "0") lbFit();
+        else if (e.key === "1") lbZoomTo(1, lbStage.clientWidth / 2, lbStage.clientHeight / 2);
+      }
+      const lbResize = () => { if (lb.style.display !== "none") lbFit(); };
+      function openLightbox(img) {
+        lb.style.display = "block";
+        lb.style.animation = "k2-lb-in .2s ease-out";
+        document.addEventListener("keydown", lbKey, true);
+        window.addEventListener("resize", lbResize);
+        lbLoad(img, _gallery.findIndex(g => imgEq(g, img)));
+      }
+      function closeLightbox() {
+        lb.style.display = "none";
+        lbImg.removeAttribute("src");
+        lbState.img = null;
+        document.removeEventListener("keydown", lbKey, true);
+        window.removeEventListener("resize", lbResize);
+        closeCtx();
       }
       function showPreviewBlob(blob) {
         try {
@@ -1986,8 +2344,10 @@ app.registerExtension({
         previewEmpty.style.display = "";
         saveChip.style.display = "none";
         clearChip.style.display = "none";
-        thumbStrip.replaceChildren();
+        thumbScroller.replaceChildren();
         thumbStrip.style.display = "none";
+        _gallery = [];
+        closeLightbox();
         pushOutput({});  // no filename → backend drops the stored replay image
         setStatus("Result cleared.");
       }
