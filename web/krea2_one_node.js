@@ -78,9 +78,9 @@ function defaultState() {
       denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
       grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true,
     },
-    // Upscale tab (4x UltraSharpV2 template): blend_factor weights the soft
-    // bilinear branch — 0 = raw model output, 0.65 = workflow default.
-    up: { factor: 2, model: "4x-UltraSharpV2.safetensors", blend: 0.65, folder: null },
+    // Upscale tab (SeedVR2 via fal.ai API — paid per call): mode "factor"
+    // (2×/4×) or "target" (fixed output resolution); noise 0.1 = node default.
+    up: { mode: "target", factor: 2, resolution: "2160p", noise: 0.1, folder: null },
     tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
@@ -98,6 +98,10 @@ function loadState() {
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
     s.q = Object.assign(defaultState().q, s.q || {});
     s.up = Object.assign(defaultState().up, s.up || {});
+    delete s.up.model; delete s.up.blend;   // pre-fal (4x UltraSharpV2) state
+    if (s.up.mode !== "factor" && s.up.mode !== "target") s.up.mode = "target";
+    if (![2, 4].includes(s.up.factor)) s.up.factor = 2;
+    if (!["720p", "1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
     if (!["t2i", "t2iq", "scene", "upscale"].includes(s.tab)) s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
@@ -492,7 +496,7 @@ if (!window.__krea2_listeners) {
         const f = Math.min(1, Math.max(0, (d.value - s) / (d.max - s)));
         a.setStage?.(`Pass 2 · Step ${d.value}/${d.max}`, (plan.split + f * (1 - plan.split)) * 100);
       } else if (nodeId === "K2U:up") {
-        // Upscale-model pass reports tile progress — single-stage bar.
+        // fal API node — if it reports progress at all, show a single-stage bar.
         a.setStage?.(`Upscaling · ${d.value}/${d.max}`, (d.value / d.max) * 100);
       } else {
         a.setStage?.("Finishing…", null);
@@ -783,7 +787,7 @@ app.registerExtension({
           m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : () => {},
           !enabled);
         if (!enabled) p.title = `${m} — coming in a later phase`;
-        if (m === "UPSCALE") { pillUp = p; p.title = "Upscale — 4x UltraSharpV2 folder batch"; }
+        if (m === "UPSCALE") { pillUp = p; p.title = "Upscale — SeedVR2 (fal.ai API, paid) folder batch"; }
         toolbar.appendChild(p);
         if (m === "T2I") {
           pillT2I = p;
@@ -959,18 +963,31 @@ app.registerExtension({
       upPathRow.append(upPathTxt, noDrag(upPathClear));
       const upCountTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
       upBox.append(upPathRow, upCountTxt);
-      const upFacCap = cap("Factor"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
+      const upFacCap = cap("Upscale To"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
       upBox.appendChild(upFacCap);
       const upFacRow = mk("div", { display: "flex", gap: "5px" });
-      const facPills = [2, 4].map(f => {
-        const p = Pill(`${f}×`, S.up.factor === f, () => {
-          S.up.factor = f; persist(); syncUpFactor();
+      // SeedVR2 takes either a multiplier or a fixed target resolution — one
+      // pill row covers both (factor mode: 2×/4×; target mode: 1080p/2160p).
+      const UP_SCALES = [
+        { label: "2×", mode: "factor", factor: 2 },
+        { label: "4×", mode: "factor", factor: 4 },
+        { label: "1080p", mode: "target", resolution: "1080p" },
+        { label: "2160p", mode: "target", resolution: "2160p" },
+      ];
+      const upScaleActive = (o) => o.mode === "factor"
+        ? S.up.mode === "factor" && S.up.factor === o.factor
+        : S.up.mode === "target" && S.up.resolution === o.resolution;
+      const facPills = UP_SCALES.map(o => {
+        const p = Pill(o.label, upScaleActive(o), () => {
+          S.up.mode = o.mode;
+          if (o.mode === "factor") S.up.factor = o.factor; else S.up.resolution = o.resolution;
+          persist(); syncUpFactor();
         });
-        p._factor = f;
+        p._scale = o;
         upFacRow.appendChild(p);
         return p;
       });
-      function syncUpFactor() { facPills.forEach(p => setPillActive(p, S.up.factor === p._factor)); }
+      function syncUpFactor() { facPills.forEach(p => setPillActive(p, upScaleActive(p._scale))); }
       upBox.appendChild(upFacRow);
       const syncUpSource = () => {
         const drop = S._upDrop;
@@ -1269,17 +1286,13 @@ app.registerExtension({
       // with no UI control, per user preference.)
       advPanel.append(advT2I2, advQ2);
 
-      // Upscale tab section: model picker + soft-blend strength (no seed —
-      // the pipeline has no sampler).
+      // Upscale tab section: SeedVR2 noise scale (seed row stays hidden —
+      // the template pins seed -1, i.e. fal picks a random one per call).
       const advU = advSec();
       advU.appendChild(advDivider("Upscale"));
-      const upModelDD = DD(() => S._models.upscale_models, S.up.model,
-        v => { S.up.model = v; persist(); },
-        f => f.replace(/\.safetensors$/i, ""));
-      advU.appendChild(advGrid(["Model", upModelDD]));
-      const upBlend = DragNI(S.up.blend, 0, 1, 0.05, v => { S.up.blend = v; persist(); }, "48px");
-      upBlend.title = "Soft blend — 0 = raw model output, 0.65 = workflow default (65% bilinear)";
-      advU.appendChild(advGrid(["Blend", upBlend]));
+      const upNoise = DragNI(S.up.noise, 0, 1, 0.05, v => { S.up.noise = v; persist(); }, "48px");
+      upNoise.title = "SeedVR2 noise scale — 0.1 = default; higher invents more detail";
+      advU.appendChild(advGrid(["Noise", upNoise]));
       advPanel.appendChild(advU);
 
       const syncAdv = () => {
@@ -1714,7 +1727,7 @@ app.registerExtension({
       cmpChip.title = "Before / after slider for this upscaled result";
       const upChip = DarkChip("⤢ Upscale ▾", () => openUpscaleMenu(upChip));
       upChip.style.display = "none";
-      upChip.title = "Upscale this image with 4x UltraSharpV2";
+      upChip.title = "Upscale this image with SeedVR2 (fal.ai API, paid)";
       const clearChip = DarkChip("✕ Clear", () => doClearResult());
       clearChip.style.display = "none";
       clearChip.title = "Clear the result from this node (files on disk are untouched)";
@@ -2156,12 +2169,14 @@ app.registerExtension({
         const img = S.lastImage;
         if (!img?.filename) return;
         ctxMenu.replaceChildren(
-          ctxItem("⤢", "Upscale 2×", () => doViewerUpscale(img, 2)),
-          ctxItem("⤢", "Upscale 4×", () => doViewerUpscale(img, 4)),
+          ctxItem("⤢", "Upscale 2×", () => doViewerUpscale(img, { mode: "factor", factor: 2 })),
+          ctxItem("⤢", "Upscale 4×", () => doViewerUpscale(img, { mode: "factor", factor: 4 })),
+          ctxItem("⤢", "Upscale → 1080p", () => doViewerUpscale(img, { mode: "target", resolution: "1080p" })),
+          ctxItem("⤢", "Upscale → 2160p", () => doViewerUpscale(img, { mode: "target", resolution: "2160p" })),
         );
         const r = anchor.getBoundingClientRect();
         ctxMenu.style.left = Math.min(r.left, window.innerWidth - 200) + "px";
-        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 84) + "px";
+        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 152) + "px";
         ctxMenu.style.display = "flex";
         document.addEventListener("pointerdown", ctxDoc, true);
       }
@@ -2627,13 +2642,19 @@ app.registerExtension({
         const t = img.type || "output";
         return t === "input" ? base : `${base} [${t}]`;
       };
+      // Current pill selection as a job-scale descriptor (snapshotted per job
+      // so a mid-run pill change can't retarget queued work).
+      const upScaleSel = () => S.up.mode === "factor"
+        ? { mode: "factor", factor: S.up.factor }
+        : { mode: "target", resolution: S.up.resolution };
       function buildUpscalePrompt(tpl, o) {
         const p = JSON.parse(JSON.stringify(tpl));
         p["K2U:load"].inputs.image = o.imageName;
-        p["K2U:model"].inputs.model_name = S.up.model;
-        p["K2U:scale"].inputs.scale_by = o.factor / 4;  // model output is exactly ×4
-        p["K2U:soft"].inputs.scale_by = o.factor;
-        p["K2U:blend"].inputs.blend_factor = S.up.blend;
+        const u = p["K2U:up"].inputs;
+        u.upscale_mode = o.scale.mode;
+        if (o.scale.mode === "factor") u.upscale_factor = o.scale.factor;
+        else u.target_resolution = o.scale.resolution;
+        u.noise_scale = S.up.noise;
         // Folder-batch jobs force SaveImage (unattended results must land on
         // disk for the copy-back); viewer upscales respect auto-save.
         if (!S.autoSave && !o.forceSave) {
@@ -2646,7 +2667,7 @@ app.registerExtension({
         return p;
       }
       // Queue upscale jobs onto the shared rolling run. Callers own the
-      // S._submitting guard. jobs: [{imageName, factor, before, copyTo?, forceSave?}]
+      // S._submitting guard. jobs: [{imageName, scale, before, copyTo?, forceSave?}]
       async function submitUpscaleJobs(jobs) {
         try {
           const tpl = await getTemplate("upscale");
@@ -2688,12 +2709,12 @@ app.registerExtension({
           console.error("[Krea2OneNode] upscale submit failed:", e);
         }
       }
-      async function doViewerUpscale(img, factor) {
+      async function doViewerUpscale(img, scale) {
         if (S._submitting) return;
         if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
         S._submitting = true;
         try {
-          await submitUpscaleJobs([{ imageName: annotatedName(img), factor, before: img }]);
+          await submitUpscaleJobs([{ imageName: annotatedName(img), scale, before: img }]);
         } finally { S._submitting = false; }
       }
       // Stage one source image into ComfyUI's input via the official upload
@@ -2727,7 +2748,7 @@ app.registerExtension({
             setStatus(`Uploading ${drop.length} image${drop.length > 1 ? "s" : ""}…`);
             for (const f of drop) {
               try {
-                jobs.push({ ...(await uploadSource(f)), factor: S.up.factor, forceSave: true });
+                jobs.push({ ...(await uploadSource(f)), scale: upScaleSel(), forceSave: true });
               } catch (e) { skipped++; }
             }
           } else {
@@ -2745,7 +2766,7 @@ app.registerExtension({
                 const blob = await r.blob();
                 jobs.push({
                   ...(await uploadSource(new File([blob], name, { type: blob.type || "image/png" }))),
-                  factor: S.up.factor,
+                  scale: upScaleSel(),
                   copyTo: { dest_dir: S.up.folder, dest_name: "up_" + name },
                   forceSave: true,
                 });
