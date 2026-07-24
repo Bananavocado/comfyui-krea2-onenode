@@ -1324,12 +1324,13 @@ app.registerExtension({
       });
       left.appendChild(advPanel);
 
-      // grid row: label+control pairs locked on one line; controls shrink, never wrap
+      // grid row: label+control pairs locked on one line; controls shrink, never
+      // wrap. Labels may be strings or prebuilt elements (capI label + ⓘ).
       function advGrid(...pairs) {
         const cols = pairs.map(([, , w]) => `auto ${w || "1fr"}`).join(" ");
         const r = mk("div", { display: "grid", gridTemplateColumns: cols, gap: "7px", alignItems: "center" });
         for (const [labelTxt, control] of pairs) {
-          r.appendChild(advCap(labelTxt));
+          r.appendChild(typeof labelTxt === "string" ? advCap(labelTxt) : labelTxt);
           control.style.width = "100%";
           control.style.minWidth = "0";
           control.style.boxSizing = "border-box";
@@ -1342,6 +1343,55 @@ app.registerExtension({
         d.appendChild(advCap(t));
         d.appendChild(mk("div", { flex: "1", height: "1px", background: C.advBorder, opacity: ".5" }));
         return d;
+      };
+
+      // ⓘ info tips — one shared fixed-position panel on document.body (escapes
+      // the canvas transform; scaled to match the zoom like the DD panels).
+      const tipEl = mk("div", {
+        position: "fixed", zIndex: "1000002", display: "none",
+        background: C.bg1, border: `1px solid ${C.borderH}`, borderRadius: "8px",
+        boxShadow: "0 12px 32px rgba(0,0,0,.85)", padding: "9px 11px",
+        fontSize: "10px", lineHeight: "1.55", color: C.text, whiteSpace: "pre-line",
+        maxWidth: "300px", boxSizing: "border-box", pointerEvents: "none",
+        fontFamily: "'Inter','Segoe UI',system-ui,sans-serif", transformOrigin: "top left",
+      });
+      document.body.appendChild(tipEl);
+      let tipFor = null;
+      function showTip(anchor, text) {
+        tipFor = anchor;
+        tx(tipEl, text);
+        let s = 1;
+        try { s = app.canvas?.ds?.scale || 1; } catch (e) {}
+        tipEl.style.transform = `scale(${s})`;
+        tipEl.style.display = "block";
+        const r = anchor.getBoundingClientRect();
+        const w = tipEl.offsetWidth * s, h = tipEl.offsetHeight * s;
+        tipEl.style.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8)) + "px";
+        tipEl.style.top = (r.bottom + 6 + h <= window.innerHeight - 8
+          ? r.bottom + 6 : Math.max(8, r.top - h - 6)) + "px";
+      }
+      const hideTip = (anchor) => {
+        if (!anchor || tipFor === anchor) { tipEl.style.display = "none"; tipFor = null; }
+      };
+      function InfoIcon(text) {
+        const i = mk("span", {
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          width: "12px", height: "12px", borderRadius: "50%", boxSizing: "border-box",
+          border: `1px solid ${C.advBorder}`, color: C.adv, fontSize: "8px",
+          fontWeight: "700", cursor: "help", flexShrink: "0", userSelect: "none",
+          lineHeight: "1", fontStyle: "italic", fontFamily: "Georgia,serif",
+        });
+        tx(i, "i");
+        i.onmouseenter = () => showTip(i, text);
+        i.onmouseleave = () => hideTip(i);
+        i.onclick = (e) => { e.stopPropagation(); tipFor === i ? hideTip(i) : showTip(i, text); };
+        return noDrag(i);
+      }
+      // label + ⓘ pair for advGrid rows
+      const capI = (label, tip) => {
+        const w = mk("span", { display: "inline-flex", alignItems: "center", gap: "4px" });
+        w.append(advCap(label), InfoIcon(tip));
+        return w;
       };
 
       // Per-mode sections: T2I (KSampler two-pass + upscale) vs T2I HQ
@@ -1465,14 +1515,57 @@ app.registerExtension({
       advU.appendChild(advGrid(["Noise", upNoise]));
       advPanel.appendChild(advU);
 
+      // Edit tab section — Krea2 Edit patch + KSampler + mask processing.
+      // Every row carries an ⓘ tip with the source workflows' guidance.
+      const advE = advSec();
+      advE.appendChild(advDivider("Edit model"));
+      const eBoost = DragNI(S.edit.refBoost, 0, 20, 0.5, v => { S.edit.refBoost = v; persist(); });
+      const eBoostA = DragNI(S.edit.refBoostA, 0, 10, 0.5, v => { S.edit.refBoostA = v; persist(); });
+      advE.appendChild(advGrid(
+        [capI("Ref boost", "THE FIDELITY DIAL (ref_boost) — how hard the model looks at your reference.\n\n1.0 = classic v1.1 behavior\n4.0 = recommended (pre-set): much stronger face + body likeness, more reliable edits\n>10 = over-copy: removals/replacements start failing\n<1 = suppress the reference (creative freedom)\n\nApplies to the person (image 2) in Reference mode, else to your image."), eBoost],
+        [capI("Boost A", "The scene dial (image 1) in Reference (two-image) mode — leave at 1.0 unless you are exploring. No effect in single-image edits."), eBoostA]));
+      const eFit = DD(() => ["fit", "crop (legacy)"], S.edit.fitMode, v => { S.edit.fitMode = v; persist(); });
+      const eGround = NI(S.edit.groundingPx, 0, 4096, 64,
+        v => { S.edit.groundingPx = Math.max(0, Math.min(4096, Math.round((isFinite(v) ? v : 768) / 64) * 64)); persist(); });
+      advE.appendChild(advGrid(
+        [capI("Fit", "How inputs fit a different output aspect ratio.\n\nfit = resample to the output shape (default, recommended)\ncrop (legacy) = center-crop, only for v1/v1.1 weights."), eFit],
+        [capI("Ground", "grounding_px — how large the model 'sees' the input while reading your instruction (longest side, px). 384–768 is the trained range; 0 = native.\n\nGetting doubled/split compositions? LOWER it."), eGround]));
+      advE.appendChild(advDivider("Sampler"));
+      const eSteps = NI(S.edit.steps, 1, 100, 1, v => { S.edit.steps = Math.max(1, Math.round(v || 10)); persist(); });
+      const eCfg = NI(S.edit.cfg, 0, 30, 0.1, v => { S.edit.cfg = isFinite(v) ? v : 1; persist(); });
+      advE.appendChild(advGrid(
+        [capI("Steps", "Turbo model step dial:\n8 = stronger composition / instruction adherence\n10 = balanced (recommended)\n12 = more face detail"), eSteps],
+        [capI("CFG", "Turbo model: keep CFG 1. The (empty) negative prompt only matters at CFG > 1.\n\nUsing krea2_raw instead of turbo: 40 steps, CFG 3–4."), eCfg]));
+      const eSamp = DD(() => SAMPLERS, S.edit.sampler, v => { S.edit.sampler = v; persist(); });
+      const eSched = DD(() => SCHEDULERS, S.edit.scheduler, v => { S.edit.scheduler = v; persist(); });
+      advE.appendChild(advGrid(
+        [capI("Sampler", "euler / simple is the Krea 2 turbo default — both source edit workflows sample with it."), eSamp],
+        ["Sched", eSched]));
+      const eDen = NI(S.edit.denoise, 0.05, 1, 0.05,
+        v => { S.edit.denoise = isFinite(v) ? Math.min(1, Math.max(0.05, v)) : 1; persist(); });
+      advE.appendChild(advGrid(
+        [capI("Denoise", "1 = full re-render of the output canvas (normal for edits — your image steers the model through the reference patch, not the latent)."), eDen]));
+      // Mask processing — visible only while Mask mode is on.
+      const advEMask = advSec();
+      advEMask.appendChild(advDivider("Mask"));
+      const eGrow = NI(S.edit.growPx, 0, 128, 1, v => { S.edit.growPx = Math.max(0, Math.min(128, Math.round(v || 0))); persist(); });
+      const eBlur = NI(S.edit.blurRad, 1, 31, 1, v => { S.edit.blurRad = Math.max(1, Math.min(31, Math.round(v || 6))); persist(); });
+      advEMask.appendChild(advGrid(
+        [capI("Grow", "Expands the painted mask outward by N px before feathering — gives the edit room to blend past the exact brush edge (source workflow: 8)."), eGrow],
+        [capI("Feather", "Blur radius for the mask edge — soft transition between edited and original pixels (source workflow: 6, sigma 2.5)."), eBlur]));
+      advE.appendChild(advEMask);
+      advPanel.appendChild(advE);
+
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
-        const q = S.tab === "t2iq", up = S.tab === "upscale";
-        advT2I1.style.display = q || up ? "none" : "flex";
-        advT2I2.style.display = q || up ? "none" : "flex";
+        const q = S.tab === "t2iq", up = S.tab === "upscale", ed = S.tab === "edit";
+        advT2I1.style.display = q || up || ed ? "none" : "flex";
+        advT2I2.style.display = q || up || ed ? "none" : "flex";
         advQ1.style.display = q && !up ? "flex" : "none";
         advQ2.style.display = q && !up ? "flex" : "none";
         advU.style.display = up ? "flex" : "none";
+        advE.style.display = ed ? "flex" : "none";
+        advEMask.style.display = S.edit.mode === "mask" ? "flex" : "none";
         seedRowEl.style.display = up ? "none" : "grid";
       };
       syncAdv();
