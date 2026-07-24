@@ -1472,12 +1472,116 @@ app.registerExtension({
           saveChip.style.display = "none";
           clearChip.style.display = "none";
           upChip.style.display = "none";
+          cmpChip.style.display = "none";
+          cmpWrap.style.display = "none";
         }
       };
       right.appendChild(previewImg);
       const previewEmpty = mk("div", { color: C.muted, fontSize: "11px", textAlign: "center", lineHeight: "1.7" });
       previewEmpty.innerHTML = "No image yet<br><span style='font-size:9px'>Generate to see the result here</span>";
       right.appendChild(previewEmpty);
+
+      // ── before/after compare view for upscaled results ─────────────────────
+      // Two identically-fitted images; the AFTER is clipped at the divider so
+      // left = before, right = after. Drag the divider handle to sweep.
+      const cmpWrap = mk("div", { position: "absolute", inset: "0", display: "none", background: "#000", zIndex: "4" });
+      const cmpImgCss = {
+        position: "absolute", inset: "0", margin: "auto",
+        maxWidth: "100%", maxHeight: "100%", objectFit: "contain",
+      };
+      const cmpBefore = mk("img", { ...cmpImgCss }, { draggable: false });
+      const cmpAfter = mk("img", { ...cmpImgCss }, { draggable: false });
+      let cmpX = 50;
+      const cmpDiv = mk("div", {
+        position: "absolute", top: "0", bottom: "0", left: "50%", width: "18px",
+        marginLeft: "-9px", cursor: "ew-resize", zIndex: "3", touchAction: "none",
+      });
+      const cmpLine = mk("div", {
+        position: "absolute", top: "0", bottom: "0", left: "50%", width: "1.5px",
+        marginLeft: "-0.75px", background: LIME, boxShadow: "0 0 8px rgba(240,255,65,.6)",
+        pointerEvents: "none",
+      });
+      const cmpGrip = mk("div", {
+        position: "absolute", top: "50%", left: "50%", width: "22px", height: "22px",
+        transform: "translate(-50%,-50%)", borderRadius: "50%", background: "rgba(10,10,10,.85)",
+        border: `1.5px solid ${LIME}`, color: LIME, fontSize: "9px", fontWeight: "700",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        pointerEvents: "none", boxSizing: "border-box", letterSpacing: "-1px",
+      });
+      tx(cmpGrip, "◂▸");
+      cmpDiv.append(cmpLine, cmpGrip);
+      const cmpTag = (t, side) => {
+        const e = mk("div", {
+          position: "absolute", top: "8px", [side]: "8px", zIndex: "2",
+          fontSize: "8px", fontWeight: "700", letterSpacing: ".1em", color: "rgba(255,255,255,.75)",
+          background: "rgba(0,0,0,.55)", borderRadius: "4px", padding: "2px 6px",
+          pointerEvents: "none",
+        });
+        tx(e, t);
+        return e;
+      };
+      const cmpTagB = cmpTag("BEFORE", "left");
+      const cmpTagA = cmpTag("AFTER", "right");
+      cmpTagA.style.top = "36px";   // keep clear of the chips row
+      const cmpApply = () => {
+        cmpAfter.style.clipPath = `inset(0 0 0 ${cmpX}%)`;
+        cmpDiv.style.left = cmpX + "%";
+      };
+      let cmpDrag = null;
+      cmpDiv.addEventListener("pointerdown", (e) => {
+        e.stopPropagation(); e.preventDefault();
+        cmpDrag = e.pointerId;
+        try { cmpDiv.setPointerCapture(e.pointerId); } catch (err) {}
+      });
+      cmpDiv.addEventListener("pointermove", (e) => {
+        if (cmpDrag == null) return;
+        const r = cmpWrap.getBoundingClientRect();
+        cmpX = Math.min(97, Math.max(3, ((e.clientX - r.left) / r.width) * 100));
+        cmpApply();
+      });
+      const cmpDragEnd = () => {
+        if (cmpDrag == null) return;
+        try { cmpDiv.releasePointerCapture(cmpDrag); } catch (err) {}
+        cmpDrag = null;
+      };
+      cmpDiv.addEventListener("pointerup", cmpDragEnd);
+      cmpDiv.addEventListener("pointercancel", cmpDragEnd);
+      // Plain clicks on either half act on the AFTER image (lightbox / menu),
+      // same as the normal preview.
+      for (const im of [cmpBefore, cmpAfter]) {
+        im.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (S.lastImage?.filename) openLightbox(S.lastImage);
+        });
+        im.addEventListener("contextmenu", (e) => {
+          e.preventDefault(); e.stopPropagation();
+          if (S.lastImage?.filename) openCtxMenu(e, S.lastImage);
+        });
+        im.style.cursor = "zoom-in";
+      }
+      cmpWrap.append(cmpBefore, cmpAfter, cmpTagB, cmpTagA, cmpDiv);
+      noDrag(cmpWrap);
+      right.appendChild(cmpWrap);
+      function toggleCompare() {
+        S._cmpOn = !S._cmpOn;
+        syncCompare();
+      }
+      // Reconcile preview vs compare for the CURRENT image. Chip shows only
+      // when a before/after pair exists for it.
+      function syncCompare() {
+        const pair = S.lastImage?.filename && S._cmp.get(cmpKey(S.lastImage));
+        cmpChip.style.display = pair ? "" : "none";
+        cmpChip.style.color = pair && S._cmpOn ? LIME : C.text;
+        cmpChip.style.borderColor = pair && S._cmpOn ? "rgba(240,255,65,.5)" : C.borderH;
+        const on = !!pair && S._cmpOn;
+        cmpWrap.style.display = on ? "" : "none";
+        previewImg.style.display = on ? "none" : previewImg.src ? "" : "none";
+        if (on) {
+          cmpBefore.src = viewUrl(pair);
+          cmpAfter.src = viewUrl(S.lastImage);
+          cmpApply();
+        }
+      }
 
       const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
       const cmpChip = DarkChip("◧ Compare", () => toggleCompare());
@@ -1807,6 +1911,7 @@ app.registerExtension({
       S._cmp = new Map();
       function registerCompare(after, before) {
         S._cmp.set(cmpKey(after), before);
+        S._cmpOn = true;   // fresh upscale pops up in compare mode
       }
       let _gallery = [];   // images last passed to showBatch (lightbox nav + selection)
       function showImage(img) {
@@ -1817,6 +1922,7 @@ app.registerExtension({
         saveChip.style.display = img.type === "temp" ? "" : "none";
         clearChip.style.display = "";
         upChip.style.display = "";
+        syncCompare();
         pushOutput(img);
         syncThumbSel();
       }
@@ -2169,6 +2275,7 @@ app.registerExtension({
           previewImg.dataset.blobUrl = url;
           previewImg.style.display = "";
           previewEmpty.style.display = "none";
+          cmpWrap.style.display = "none";   // live preview trumps compare
           if (old) URL.revokeObjectURL(old);
         } catch (e) {}
       }
@@ -2611,6 +2718,10 @@ app.registerExtension({
         saveChip.style.display = "none";
         clearChip.style.display = "none";
         upChip.style.display = "none";
+        cmpChip.style.display = "none";
+        cmpWrap.style.display = "none";
+        S._cmp.clear();
+        S._cmpOn = false;
         thumbScroller.replaceChildren();
         thumbStrip.style.display = "none";
         _gallery = [];
@@ -2622,14 +2733,19 @@ app.registerExtension({
       async function doSaveTemp() {
         const img = S.lastImage;
         if (!img || img.type !== "temp") { setStatus("Nothing unsaved to save."); return; }
+        const pair = S._cmp.get(cmpKey(img));   // upscale results save as up_*
         try {
           const r = await api.fetchApi("/krea2_onenode/save_temp", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ filename: img.filename, subfolder: img.subfolder || "" }),
+            body: JSON.stringify({
+              filename: img.filename, subfolder: img.subfolder || "",
+              ...(pair ? { prefix: "up" } : {}),
+            }),
           });
           const d = await r.json();
           if (d.ok) {
             S.lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
+            if (pair) S._cmp.set(cmpKey(S.lastImage), pair);  // keep compare after the identity change
             saveChip.style.display = "none";
             setStatus(`Saved as ${d.filename}`, C.ok);
           } else setStatus(`Save failed: ${d.error}`, C.err);
