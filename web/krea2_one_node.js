@@ -491,13 +491,16 @@ if (!window.__krea2_listeners) {
         const s = d.max > plan.p2Start ? plan.p2Start : 0;
         const f = Math.min(1, Math.max(0, (d.value - s) / (d.max - s)));
         a.setStage?.(`Pass 2 · Step ${d.value}/${d.max}`, (plan.split + f * (1 - plan.split)) * 100);
+      } else if (nodeId === "K2U:up") {
+        // Upscale-model pass reports tile progress — single-stage bar.
+        a.setStage?.(`Upscaling · ${d.value}/${d.max}`, (d.value / d.max) * 100);
       } else {
         a.setStage?.("Finishing…", null);
       }
     }
     const bjob = _batchJob(evt);
     if (bjob) {
-      if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · Sampling ${d.value}/${d.max}`);
+      if (d?.max) a.setStatus(`Image ${bjob.seq}/${a.S._batchRun.total} · ${bjob.up ? "Upscaling" : "Sampling"} ${d.value}/${d.max}`);
       return;
     }
     const job = _sceneJob(evt);
@@ -521,6 +524,17 @@ if (!window.__krea2_listeners) {
       // thumb strip across jobs instead of replacing it per job.
       const br = a.S._batchRun;
       br.images.push(...imgs);
+      // Upscale jobs: remember the before/after pair for the compare view,
+      // and copy folder-batch results back next to their source.
+      if (bjob.up && bjob.before) a.registerCompare?.(imgs[0], bjob.before);
+      if (bjob.copyTo) {
+        api.fetchApi("/krea2_onenode/copy_result", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...imgs[0], ...bjob.copyTo }),
+        }).then(r => r.json())
+          .then(d => { if (!d.ok) a.setStatus?.(`Copy-back failed: ${d.error}`, C.warn); })
+          .catch(() => {});
+      }
       a.showBatch(br.images);
       a.showImage(imgs[0]);
       return;
@@ -1201,7 +1215,10 @@ app.registerExtension({
           genSweep.style.animation = "k2-light-sweep 1s ease forwards";
         }
       };
-      genBtn.addEventListener("click", (e) => { e.stopPropagation(); S.tab === "scene" ? doRunScene() : doGenerate(); });
+      genBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        S.tab === "scene" ? doRunScene() : S.tab === "upscale" ? doRunUpscaleBatch() : doGenerate();
+      });
       noDrag(genBtn);
 
       const stopBtn = mk("button", {
@@ -1454,6 +1471,7 @@ app.registerExtension({
           previewEmpty.style.display = "";
           saveChip.style.display = "none";
           clearChip.style.display = "none";
+          upChip.style.display = "none";
         }
       };
       right.appendChild(previewImg);
@@ -1462,6 +1480,12 @@ app.registerExtension({
       right.appendChild(previewEmpty);
 
       const overlayTR = mk("div", { position: "absolute", top: "8px", right: "8px", display: "flex", gap: "6px", zIndex: "5" });
+      const cmpChip = DarkChip("◧ Compare", () => toggleCompare());
+      cmpChip.style.display = "none";
+      cmpChip.title = "Before / after slider for this upscaled result";
+      const upChip = DarkChip("⤢ Upscale ▾", () => openUpscaleMenu(upChip));
+      upChip.style.display = "none";
+      upChip.title = "Upscale this image with 4x UltraSharpV2";
       const clearChip = DarkChip("✕ Clear", () => doClearResult());
       clearChip.style.display = "none";
       clearChip.title = "Clear the result from this node (files on disk are untouched)";
@@ -1469,7 +1493,7 @@ app.registerExtension({
       saveChip.style.display = "none";
       const useAsChip = DarkChip("Use as…  ▾", null, true);
       useAsChip.title = "Send to I2I / Edit — coming with those modes";
-      overlayTR.append(clearChip, saveChip, useAsChip);
+      overlayTR.append(cmpChip, upChip, clearChip, saveChip, useAsChip);
       right.appendChild(overlayTR);
 
       // Thumb strip — frosted overlay bar: "n/total" counter + scrollable
@@ -1540,6 +1564,7 @@ app.registerExtension({
       // rest. p2Start = start_at_step of the legacy pass 2 (its progress
       // values begin there, not at 0 — the handler rebases with it).
       function currentProgPlan() {
+        if (S.tab === "upscale") return { split: 1, p2Start: 0 };  // single stage
         if (S.tab === "t2iq") {
           const p1 = S.q.p1Steps, p2 = Math.max(1, Math.ceil(S.q.denoise * 8));
           return { split: p1 / (p1 + p2), p2Start: 0 };
@@ -1777,6 +1802,12 @@ app.registerExtension({
           && (a.subfolder || "") === (b.subfolder || "")
           && (a.type || "output") === (b.type || "output");
       }
+      // Before-image registry for upscaled results — drives the compare view.
+      const cmpKey = (img) => `${img.filename}|${img.subfolder || ""}|${img.type || "output"}`;
+      S._cmp = new Map();
+      function registerCompare(after, before) {
+        S._cmp.set(cmpKey(after), before);
+      }
       let _gallery = [];   // images last passed to showBatch (lightbox nav + selection)
       function showImage(img) {
         S.lastImage = img;
@@ -1785,6 +1816,7 @@ app.registerExtension({
         previewEmpty.style.display = "none";
         saveChip.style.display = img.type === "temp" ? "" : "none";
         clearChip.style.display = "";
+        upChip.style.display = "";
         pushOutput(img);
         syncThumbSel();
       }
@@ -1887,6 +1919,22 @@ app.registerExtension({
         ctxMenu.style.display = "flex";
         document.addEventListener("pointerdown", ctxDoc, true);
       }
+      // 2× / 4× picker for the viewer's ⤢ Upscale chip (reuses the ctx menu
+      // container, anchored under the chip).
+      function openUpscaleMenu(anchor) {
+        const img = S.lastImage;
+        if (!img?.filename) return;
+        ctxMenu.replaceChildren(
+          ctxItem("⤢", "Upscale 2×", () => doViewerUpscale(img, 2)),
+          ctxItem("⤢", "Upscale 4×", () => doViewerUpscale(img, 4)),
+        );
+        const r = anchor.getBoundingClientRect();
+        ctxMenu.style.left = Math.min(r.left, window.innerWidth - 200) + "px";
+        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 84) + "px";
+        ctxMenu.style.display = "flex";
+        document.addEventListener("pointerdown", ctxDoc, true);
+      }
+
       function revealInFinder(img) {
         // Backend reveals the exact file (open -R); with no filename it opens
         // the gallery output folder instead.
@@ -2252,25 +2300,33 @@ app.registerExtension({
         tx(genBtn, `Queue (${pending})`);
         genBtn.appendChild(genSweep);
       }
+      // Start (or join) the rolling batch-run and (re-)register the active
+      // handlers — jobs already running keep emitting events while new ones
+      // are queued, and each click refreshes the progress plan snapshot for
+      // the latest settings. Shared by T2I/T2I HQ generates and upscales.
+      function startBatchRun() {
+        const first = !S._batchRun;
+        if (first) {
+          S._batchRun = { jobs: new Map(), total: 0, done: 0, images: [] };
+          S._generating = true;
+          timerStart();
+          progShow();
+          syncStop(true);
+          setStatus("Queued…");
+        }
+        window.__krea2_active = {
+          S, showImage, showBatch, showPreviewBlob, setStatus, setStage,
+          syncQueueUI, registerCompare, prog: currentProgPlan(), done: finishGenerate,
+        };
+        return first;
+      }
       async function doGenerate() {
         if (S._submitting || S._scene) return;
         if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
         S._submitting = true;
         try {
           const tpl = await getTemplate(S.tab === "t2iq" ? "quality" : "generate");
-          const first = !S._batchRun;
-          if (first) {
-            S._batchRun = { jobs: new Map(), total: 0, done: 0, images: [] };
-            S._generating = true;
-            timerStart();
-            progShow();
-            syncStop(true);
-            setStatus("Queued…");
-          }
-          // (Re-)register before the POSTs — jobs already running keep
-          // emitting events while new ones are queued, and each click
-          // refreshes the progress plan snapshot for the latest settings.
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, syncQueueUI, prog: currentProgPlan(), done: finishGenerate };
+          const first = startBatchRun();
           // Batch ×N queues N single-image jobs (seed, seed+1, …) — batched
           // latents degrade quality on MPS, and per-image jobs surface
           // results as they finish.
@@ -2323,12 +2379,133 @@ app.registerExtension({
         S._generating = false;
         timerStop();
         progIdle();
-        tx(genBtn, S.tab === "scene" ? "Run Scene" : "Generate");
+        tx(genBtn, S.tab === "scene" ? "Run Scene" : S.tab === "upscale" ? "Upscale" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
         genBtn.style.color = "#111";
         syncStop(false);
         syncSceneLock();
+      }
+
+      // ── upscale submits (viewer chip + folder batch) ───────────────────────
+      // "subfolder/name [type]" — LoadImage's validator accepts annotated
+      // paths, so temp/output results feed straight back in without uploads.
+      const annotatedName = (img) => {
+        const base = (img.subfolder ? img.subfolder + "/" : "") + img.filename;
+        const t = img.type || "output";
+        return t === "input" ? base : `${base} [${t}]`;
+      };
+      function buildUpscalePrompt(tpl, o) {
+        const p = JSON.parse(JSON.stringify(tpl));
+        p["K2U:load"].inputs.image = o.imageName;
+        p["K2U:model"].inputs.model_name = S.up.model;
+        p["K2U:scale"].inputs.scale_by = o.factor / 4;  // model output is exactly ×4
+        p["K2U:soft"].inputs.scale_by = o.factor;
+        p["K2U:blend"].inputs.blend_factor = S.up.blend;
+        // Folder-batch jobs force SaveImage (unattended results must land on
+        // disk for the copy-back); viewer upscales respect auto-save.
+        if (!S.autoSave && !o.forceSave) {
+          p["K2U:save"] = {
+            inputs: { images: p["K2U:save"].inputs.images },
+            class_type: "PreviewImage",
+            _meta: { title: "Preview (unsaved)" },
+          };
+        }
+        return p;
+      }
+      // Queue upscale jobs onto the shared rolling run. Callers own the
+      // S._submitting guard. jobs: [{imageName, factor, before, copyTo?, forceSave?}]
+      async function submitUpscaleJobs(jobs) {
+        try {
+          const tpl = await getTemplate("upscale");
+          const first = startBatchRun();
+          const br = S._batchRun;
+          let failed = null;
+          for (const j of jobs) {
+            const prompt = buildUpscalePrompt(tpl, j);
+            const resp = await api.fetchApi("/prompt", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: api.clientId }),
+            });
+            const result = await resp.json();
+            if (!resp.ok || result.error) {
+              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+              failed = { msg: nodeErrs || msg };
+              break;   // rest of this click's jobs would fail identically
+            }
+            br.jobs.set(result.prompt_id, {
+              seq: br.total + 1, up: true, before: j.before || null, copyTo: j.copyTo || null,
+            });
+            br.total++;
+          }
+          if (first && !br.total) {
+            S._batchRun = null;
+            throw new Error(failed ? failed.msg : "failed to queue");
+          }
+          syncQueueUI();
+          const pending = br.total - br.done;
+          setStatus(failed
+            ? `Queue error: ${failed.msg}`
+            : pending > 1 ? `${pending} in queue` : "Upscaling…",
+            failed ? C.warn : C.text);
+        } catch (e) {
+          finishGenerate();
+          setStatus(`Error: ${e.message}`, C.err);
+          console.error("[Krea2OneNode] upscale submit failed:", e);
+        }
+      }
+      async function doViewerUpscale(img, factor) {
+        if (S._submitting) return;
+        if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
+        S._submitting = true;
+        try {
+          await submitUpscaleJobs([{ imageName: annotatedName(img), factor, before: img }]);
+        } finally { S._submitting = false; }
+      }
+      async function doRunUpscaleBatch() {
+        if (S._submitting) return;
+        if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
+        if (!S.up.folder) { setStatus("Choose a source folder first.", C.err); return; }
+        S._submitting = true;
+        try {
+          await refreshUpFolder();
+          const files = S._upFiles;
+          if (files == null) { setStatus("Folder not authorized — choose it again.", C.err); return; }
+          if (!files.length) { setStatus("No images in the folder.", C.err); return; }
+          // Stage each source into ComfyUI's input via the official upload API
+          // (the backend only hands us the bytes — no direct folder writes).
+          setStatus(`Uploading ${files.length} image${files.length > 1 ? "s" : ""}…`);
+          const jobs = [];
+          let skipped = 0;
+          for (const name of files) {
+            try {
+              const r = await api.fetchApi(
+                `/krea2_onenode/read_file?path=${encodeURIComponent(S.up.folder)}&name=${encodeURIComponent(name)}`);
+              if (!r.ok) throw new Error(`read ${r.status}`);
+              const blob = await r.blob();
+              const fd = new FormData();
+              fd.append("image", new File([blob], name, { type: blob.type || "image/png" }));
+              fd.append("subfolder", "krea2-onenode-src");
+              fd.append("overwrite", "true");
+              const ur = await api.fetchApi("/upload/image", { method: "POST", body: fd });
+              if (!ur.ok) throw new Error(`upload ${ur.status}`);
+              const ud = await ur.json();
+              const sub = ud.subfolder || "krea2-onenode-src";
+              jobs.push({
+                imageName: (sub ? sub + "/" : "") + ud.name,
+                factor: S.up.factor,
+                before: { filename: ud.name, subfolder: sub, type: "input" },
+                copyTo: { dest_dir: S.up.folder, dest_name: "up_" + name },
+                forceSave: true,
+              });
+            } catch (e) { skipped++; }
+          }
+          if (!jobs.length) { setStatus("Every file failed to upload.", C.err); return; }
+          if (skipped) setStatus(`${skipped} file${skipped > 1 ? "s" : ""} failed to upload — upscaling ${jobs.length}.`, C.warn);
+          await submitUpscaleJobs(jobs);
+        } finally { S._submitting = false; }
       }
 
       // ── scene run: queue every prompt upfront (server-side queue does the
@@ -2433,6 +2610,7 @@ app.registerExtension({
         previewEmpty.style.display = "";
         saveChip.style.display = "none";
         clearChip.style.display = "none";
+        upChip.style.display = "none";
         thumbScroller.replaceChildren();
         thumbStrip.style.display = "none";
         _gallery = [];
@@ -2471,6 +2649,7 @@ app.registerExtension({
         previewEmpty.style.display = "none";
         saveChip.style.display = S.lastImage.type === "temp" ? "" : "none";
         clearChip.style.display = "";
+        upChip.style.display = "";
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
