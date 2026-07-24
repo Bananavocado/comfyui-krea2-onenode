@@ -937,12 +937,28 @@ app.registerExtension({
       upPickChip.style.alignSelf = "flex-start";
       upPickChip.title = "Native folder picker — results also copy back into <folder>/upscaled/";
       upBox.appendChild(upPickChip);
+      const upPathRow = mk("div", { display: "flex", alignItems: "center", gap: "4px", minWidth: "0" });
       const upPathTxt = mk("div", {
-        fontSize: "10px", color: C.muted, whiteSpace: "nowrap",
+        fontSize: "10px", color: C.muted, whiteSpace: "nowrap", flex: "1", minWidth: "0",
         overflow: "hidden", textOverflow: "ellipsis", direction: "rtl", textAlign: "left",
       });
+      const upPathClear = mk("button", {
+        background: "none", border: "none", cursor: "pointer", color: C.muted,
+        fontSize: "11px", outline: "none", flexShrink: "0", padding: "0 2px",
+      }, { title: "Clear folder" });
+      tx(upPathClear, "✕");
+      upPathClear.onmouseenter = () => upPathClear.style.color = C.err;
+      upPathClear.onmouseleave = () => upPathClear.style.color = C.muted;
+      upPathClear.onclick = (e) => {
+        e.stopPropagation();
+        S.up.folder = null;
+        S._upFiles = undefined;
+        persist();
+        syncUpSource();
+      };
+      upPathRow.append(upPathTxt, noDrag(upPathClear));
       const upCountTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
-      upBox.append(upPathTxt, upCountTxt);
+      upBox.append(upPathRow, upCountTxt);
       const upFacCap = cap("Factor"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
       upBox.appendChild(upFacCap);
       const upFacRow = mk("div", { display: "flex", gap: "5px" });
@@ -970,7 +986,7 @@ app.registerExtension({
           dzClear.style.display = "none";
         }
         tx(upPathTxt, S.up.folder || "");
-        upPathTxt.style.display = S.up.folder ? "" : "none";
+        upPathRow.style.display = S.up.folder ? "flex" : "none";
         upPathTxt.title = S.up.folder || "";
         const f = S._upFiles;
         tx(upCountTxt, !S.up.folder ? ""
