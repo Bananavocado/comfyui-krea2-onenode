@@ -1150,7 +1150,7 @@ app.registerExtension({
 
       // Mask mode row: painter entry + status.
       const editMaskRow = mk("div", { display: "none", alignItems: "center", gap: "6px" });
-      const paintChip = LimeChip("Paint mask…", () => openMaskPainter());
+      const paintChip = LimeChip("Paint mask…", () => openMaskEditor());
       const editMaskStat = mk("div", {
         fontSize: "9px", fontWeight: "700", color: C.muted, flex: "1", minWidth: "0",
         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -2100,6 +2100,97 @@ app.registerExtension({
       const mpKey = (e) => {
         if (e.key === "Escape") { e.stopPropagation(); closeMaskPainter(false); }
       };
+      // Native ComfyUI Mask Editor — primary path. The editor only operates
+      // on a SELECTED GRAPH NODE with a loaded image (a clipspace stub is
+      // ignored — verified), so we spawn a temporary offscreen LoadImage,
+      // open the editor on it, and watch its widget: Save pastes the painted
+      // PNG back as "clipspace/… [input]" — an annotated name K2E:mask eats
+      // directly, no upload. Cancel (dialog gone, value untouched) discards.
+      // Any internals mismatch falls back to the built-in painter below.
+      let _nmeBusy = false;
+      async function openMaskEditor() {
+        if (_nmeBusy) return;
+        const src = S._editSrc;
+        if (!src) { setStatus("Pick a source image first.", C.err); return; }
+        _nmeBusy = true;
+        let temp = null;
+        const cleanup = () => {
+          if (temp) { try { app.graph.remove(temp); } catch (e) {} temp = null; }
+          try { app.canvas.deselectAll ? app.canvas.deselectAll() : app.canvas.deselectAllNodes?.(); } catch (e) {}
+        };
+        try {
+          if (typeof app.extensionManager?.command?.execute !== "function")
+            throw new Error("no command API");
+          // stage the image the editor loads: an existing mask re-opens for
+          // further editing, file sources upload once and reuse the name
+          let name;
+          if (S._editMask?.name) {
+            name = S._editMask.name;
+          } else if (src.kind === "file") {
+            if (!src.uploadedName) {
+              setStatus("Uploading source…");
+              const up = await uploadSource(src.file);
+              src.uploadedName = up.imageName;
+              src.uploadedBefore = up.before;
+            }
+            name = src.uploadedName;
+          } else {
+            name = annotatedName(src.img);
+          }
+          temp = LiteGraph.createNode("LoadImage");
+          if (!temp) throw new Error("LoadImage unavailable");
+          temp.pos = [-99999, -99999];
+          app.graph.add(temp);
+          const w = temp.widgets?.find(x => x.name === "image");
+          if (!w) throw new Error("no image widget");
+          w.value = name;
+          // LoadImage previews load lazily on canvas draw — an offscreen node
+          // never draws, so stage the preview image ourselves (the editor
+          // reads node.imgs[imageIndex]).
+          const m = name.match(/^(.*?)\s*\[(input|temp|output)\]$/);
+          const path = m ? m[1] : name;
+          const cut = path.lastIndexOf("/");
+          const desc = {
+            filename: cut >= 0 ? path.slice(cut + 1) : path,
+            subfolder: cut >= 0 ? path.slice(0, cut) : "",
+            type: m ? m[2] : "input",
+          };
+          const pv = new Image();
+          await new Promise((res, rej) => {
+            pv.onload = res;
+            pv.onerror = () => rej(new Error("preview failed to load"));
+            pv.src = viewUrl(desc);
+          });
+          temp.imgs = [pv];
+          temp.imageIndex = 0;
+          app.canvas.selectNode(temp);
+          app.extensionManager.command.execute("Comfy.MaskEditor.OpenMaskEditor").catch(() => {});
+          setStatus("Mask editor open — paint, then Save.");
+          const EDITOR_SEL = ".maskeditor, [class*='mask-editor'], [class*='maskEditor']";
+          let sawDialog = false;
+          for (let i = 0; i < 1200; i++) {   // ≤10 min in the editor
+            await new Promise(r => setTimeout(r, 500));
+            if (w.value !== name) {          // Save rewrote the widget
+              S._editMask = { name: w.value };
+              setStatus("Mask saved.");
+              break;
+            }
+            if (document.querySelector(EDITOR_SEL)) sawDialog = true;
+            else if (sawDialog) { setStatus("Mask edit cancelled."); break; }
+            else if (i > 10) throw new Error("editor never opened");
+          }
+          cleanup();
+          syncEditUI();
+        } catch (e) {
+          cleanup();
+          console.warn("[Krea2OneNode] native mask editor unavailable:", e);
+          setStatus("Native mask editor unavailable — using built-in painter.", C.warn);
+          openMaskPainter();
+        } finally {
+          _nmeBusy = false;
+        }
+      }
+
       function openMaskPainter() {
         const src = S._editSrc;
         if (!src) { setStatus("Pick a source image first.", C.err); return; }
@@ -3291,19 +3382,30 @@ app.registerExtension({
         S._submitting = true;
         try {
           // Stage inputs once per click — every batch job reuses them.
+          // (File sources may already be staged by the native mask editor.)
           let srcName, before;
           if (src.kind === "file") {
-            setStatus("Uploading source…");
-            ({ imageName: srcName, before } = await uploadSource(src.file));
+            if (!src.uploadedName) {
+              setStatus("Uploading source…");
+              const up = await uploadSource(src.file);
+              src.uploadedName = up.imageName;
+              src.uploadedBefore = up.before;
+            }
+            srcName = src.uploadedName;
+            before = src.uploadedBefore;
           } else {
             srcName = annotatedName(src.img);
             before = src.img;
           }
           let maskName = null;
           if (S.edit.mode === "mask") {
-            setStatus("Uploading mask…");
-            const mf = new File([S._editMask.blob], `k2e_mask_${Date.now()}.png`, { type: "image/png" });
-            ({ imageName: maskName } = await uploadSource(mf));
+            if (S._editMask.name) {
+              maskName = S._editMask.name;   // native editor result, already server-side
+            } else {
+              setStatus("Uploading mask…");
+              const mf = new File([S._editMask.blob], `k2e_mask_${Date.now()}.png`, { type: "image/png" });
+              ({ imageName: maskName } = await uploadSource(mf));
+            }
           }
           let refName = null;
           if (S.edit.mode === "ref") {
