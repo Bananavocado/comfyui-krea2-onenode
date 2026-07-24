@@ -66,6 +66,9 @@ PromptServer.instance.routes.get("/krea2_onenode/workflow_quality")(
 PromptServer.instance.routes.get("/krea2_onenode/workflow_upscale")(
     _serve_json("workflows/upscale_workflow.json"))
 
+PromptServer.instance.routes.get("/krea2_onenode/workflow_edit")(
+    _serve_json("workflows/edit_workflow.json"))
+
 
 # ---------------------------------------------------------------------------
 # Batch-upscale source folders
