@@ -1,0 +1,239 @@
+{
+  "K2E:unet": {
+    "inputs": {
+      "unet_name": "krea2_turbo_bf16.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "Load Diffusion Model" }
+  },
+  "K2E:idlora": {
+    "inputs": {
+      "lora_name": "krea2_identity_edit_v1_2.safetensors",
+      "strength_model": 1.0,
+      "model": ["K2E:unet", 0]
+    },
+    "class_type": "LoraLoaderModelOnly",
+    "_meta": { "title": "Identity Edit LoRA (hardwired)" }
+  },
+  "K2E:lora": {
+    "inputs": {
+      "model": ["K2E:idlora", 0]
+    },
+    "class_type": "Power Lora Loader (rgthree)",
+    "_meta": { "title": "LoRA Stack" }
+  },
+  "K2E:clip": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": { "title": "Load CLIP" }
+  },
+  "K2E:vae": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": { "title": "Load VAE" }
+  },
+  "K2E:img": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Source / scene image" }
+  },
+  "K2E:resize": {
+    "inputs": {
+      "input": ["K2E:img", 0],
+      "resize_type": "scale dimensions",
+      "resize_type.width": 1024,
+      "resize_type.height": 1024,
+      "resize_type.crop": "disabled",
+      "scale_method": "area"
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": { "title": "Source → output dims" }
+  },
+  "K2E:enc": {
+    "inputs": {
+      "pixels": ["K2E:resize", 0],
+      "vae": ["K2E:vae", 0]
+    },
+    "class_type": "VAEEncode",
+    "_meta": { "title": "Encode source" }
+  },
+  "K2E:pos": {
+    "inputs": {
+      "clip": ["K2E:clip", 0],
+      "prompt": "",
+      "grounding_px": 768,
+      "system_prompt": "",
+      "image": ["K2E:resize", 0],
+      "image_b": ["K2E:resizeb", 0]
+    },
+    "class_type": "Krea2EditGroundedEncode",
+    "_meta": { "title": "Instruction" }
+  },
+  "K2E:neg": {
+    "inputs": {
+      "clip": ["K2E:clip", 0],
+      "prompt": "",
+      "grounding_px": 768,
+      "system_prompt": "",
+      "image": ["K2E:resize", 0],
+      "image_b": ["K2E:resizeb", 0]
+    },
+    "class_type": "Krea2EditGroundedEncode",
+    "_meta": { "title": "Negative (empty — used only at CFG > 1)" }
+  },
+  "K2E:latent": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptySD3LatentImage",
+    "_meta": { "title": "Output latent" }
+  },
+  "K2E:patch": {
+    "inputs": {
+      "model": ["K2E:lora", 0],
+      "source_latent": ["K2E:enc", 0],
+      "source_latent_b": ["K2E:encb", 0],
+      "ref_boost": 4.0,
+      "ref_boost_a": 1.0,
+      "fit_mode": "fit",
+      "ref_boost_mask": ["K2E:mresize", 0],
+      "vae": ["K2E:vae", 0],
+      "source_image": ["K2E:resize", 0],
+      "source_image_b": ["K2E:resizeb", 0]
+    },
+    "class_type": "Krea2EditModelPatch",
+    "_meta": { "title": "Krea2 Edit model patch" }
+  },
+  "K2E:sampler": {
+    "inputs": {
+      "model": ["K2E:patch", 0],
+      "positive": ["K2E:pos", 0],
+      "negative": ["K2E:neg", 0],
+      "latent_image": ["K2E:latent", 0],
+      "seed": 0,
+      "steps": 10,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "KSampler" }
+  },
+  "K2E:decode": {
+    "inputs": {
+      "samples": ["K2E:sampler", 0],
+      "vae": ["K2E:vae", 0]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "Decode" }
+  },
+  "K2E:mask": {
+    "inputs": {
+      "image": "mask.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Painted mask (alpha)" }
+  },
+  "K2E:mresize": {
+    "inputs": {
+      "input": ["K2E:mask", 1],
+      "resize_type": "scale dimensions",
+      "resize_type.width": 1024,
+      "resize_type.height": 1024,
+      "resize_type.crop": "disabled",
+      "scale_method": "area"
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": { "title": "Mask → output dims" }
+  },
+  "K2E:grow": {
+    "inputs": {
+      "mask": ["K2E:mresize", 0],
+      "expand": 8,
+      "tapered_corners": true
+    },
+    "class_type": "GrowMask",
+    "_meta": { "title": "Grow mask" }
+  },
+  "K2E:m2i": {
+    "inputs": {
+      "mask": ["K2E:grow", 0]
+    },
+    "class_type": "MaskToImage",
+    "_meta": { "title": "Mask → image" }
+  },
+  "K2E:blur": {
+    "inputs": {
+      "image": ["K2E:m2i", 0],
+      "blur_radius": 6,
+      "sigma": 2.5
+    },
+    "class_type": "ImageBlur",
+    "_meta": { "title": "Feather mask" }
+  },
+  "K2E:i2m": {
+    "inputs": {
+      "image": ["K2E:blur", 0],
+      "channel": "red"
+    },
+    "class_type": "ImageToMask",
+    "_meta": { "title": "Image → mask" }
+  },
+  "K2E:comp": {
+    "inputs": {
+      "destination": ["K2E:resize", 0],
+      "source": ["K2E:decode", 0],
+      "x": 0,
+      "y": 0,
+      "resize_source": false,
+      "mask": ["K2E:i2m", 0]
+    },
+    "class_type": "ImageCompositeMasked",
+    "_meta": { "title": "Composite (edit inside mask only)" }
+  },
+  "K2E:imgb": {
+    "inputs": {
+      "image": "person.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Person (2nd reference)" }
+  },
+  "K2E:resizeb": {
+    "inputs": {
+      "input": ["K2E:imgb", 0],
+      "resize_type": "scale longer dimension",
+      "resize_type.longer_size": 1024,
+      "scale_method": "area"
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": { "title": "Person → ~1MP" }
+  },
+  "K2E:encb": {
+    "inputs": {
+      "pixels": ["K2E:resizeb", 0],
+      "vae": ["K2E:vae", 0]
+    },
+    "class_type": "VAEEncode",
+    "_meta": { "title": "Encode person" }
+  },
+  "K2E:save": {
+    "inputs": {
+      "filename_prefix": "krea2-onenode/edit",
+      "images": ["K2E:comp", 0]
+    },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save" }
+  }
+}
