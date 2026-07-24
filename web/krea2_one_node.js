@@ -78,7 +78,10 @@ function defaultState() {
       denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
       grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true,
     },
-    tab: "t2i",                 // "t2i" | "t2iq" | "scene"
+    // Upscale tab (4x UltraSharpV2 template): blend_factor weights the soft
+    // bilinear branch — 0 = raw model output, 0.65 = workflow default.
+    up: { factor: 2, model: "4x-UltraSharpV2.safetensors", blend: 0.65, folder: null },
+    tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
 }
@@ -94,7 +97,8 @@ function loadState() {
     }
     if (s.presetIdx !== CUSTOM && !PRESETS[s.presetIdx]) s.presetIdx = 2;
     s.q = Object.assign(defaultState().q, s.q || {});
-    if (s.tab !== "scene" && s.tab !== "t2iq") s.tab = "t2i";
+    s.up = Object.assign(defaultState().up, s.up || {});
+    if (!["t2i", "t2iq", "scene", "upscale"].includes(s.tab)) s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
       prompt: typeof r?.prompt === "string" ? r.prompt : "",
@@ -726,7 +730,7 @@ app.registerExtension({
     nodeType.prototype._buildUI = function () {
       const self = this;
       const S = loadState();
-      S._models = { diffusion_models: [], text_encoders: [], vaes: [], loras: [] };
+      S._models = { diffusion_models: [], text_encoders: [], vaes: [], loras: [], upscale_models: [] };
       S._generating = false;
       const persist = () => saveState(S);
 
@@ -757,10 +761,15 @@ app.registerExtension({
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
-      let pillT2I, pillQ, pillScene;
+      let pillT2I, pillQ, pillScene, pillUp;
       for (const m of MODES) {
-        const p = Pill(m, m === "T2I" && S.tab === "t2i", m === "T2I" ? () => setTab("t2i") : () => {}, m !== "T2I");
-        if (m !== "T2I") p.title = `${m} — coming in a later phase`;
+        const enabled = m === "T2I" || m === "UPSCALE";
+        const p = Pill(m,
+          (m === "T2I" && S.tab === "t2i") || (m === "UPSCALE" && S.tab === "upscale"),
+          m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : () => {},
+          !enabled);
+        if (!enabled) p.title = `${m} — coming in a later phase`;
+        if (m === "UPSCALE") { pillUp = p; p.title = "Upscale — 4x UltraSharpV2 folder batch"; }
         toolbar.appendChild(p);
         if (m === "T2I") {
           pillT2I = p;
@@ -818,9 +827,67 @@ app.registerExtension({
         Toggle(S.advancedUI, v => { S.advancedUI = v; persist(); syncAdv(); }));
       left.appendChild(advTogRow);
 
+      // ── UPSCALE tab: source folder + factor (shown instead of Size/LoRAs) ──
+      const upBox = mk("div", { display: "none", flexDirection: "column", gap: "8px" });
+      upBox.appendChild(cap("Source"));
+      const upPickChip = LimeChip("Choose Folder…", () => doPickFolder());
+      upPickChip.style.alignSelf = "flex-start";
+      upBox.appendChild(upPickChip);
+      const upPathTxt = mk("div", {
+        fontSize: "10px", color: C.muted, whiteSpace: "nowrap",
+        overflow: "hidden", textOverflow: "ellipsis", direction: "rtl", textAlign: "left",
+      });
+      const upCountTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
+      upBox.append(upPathTxt, upCountTxt);
+      const upFacCap = cap("Factor"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
+      upBox.appendChild(upFacCap);
+      const upFacRow = mk("div", { display: "flex", gap: "5px" });
+      const facPills = [2, 4].map(f => {
+        const p = Pill(`${f}×`, S.up.factor === f, () => {
+          S.up.factor = f; persist(); syncUpFactor();
+        });
+        p._factor = f;
+        upFacRow.appendChild(p);
+        return p;
+      });
+      function syncUpFactor() { facPills.forEach(p => setPillActive(p, S.up.factor === p._factor)); }
+      upBox.appendChild(upFacRow);
+      const syncUpSource = () => {
+        tx(upPathTxt, S.up.folder || "No folder chosen");
+        upPathTxt.title = S.up.folder || "";
+        const f = S._upFiles;
+        tx(upCountTxt, !S.up.folder ? ""
+          : f === null ? "Choose the folder again (server restarted)"
+          : f === undefined ? "…"
+          : `${f.length} image${f.length === 1 ? "" : "s"}`);
+        upCountTxt.style.color = f === null ? C.warn : "rgba(240,255,65,.55)";
+      };
+      async function refreshUpFolder() {
+        if (!S.up.folder) { syncUpSource(); return; }
+        S._upFiles = undefined; syncUpSource();
+        try {
+          const d = await api.fetchApi(`/krea2_onenode/list_folder?path=${encodeURIComponent(S.up.folder)}`).then(r => r.json());
+          S._upFiles = d.ok ? d.files : null;
+          if (!d.ok && !d.unauthorized) setStatus(`Folder error: ${d.error}`, C.err);
+        } catch (e) { S._upFiles = null; }
+        syncUpSource();
+      }
+      async function doPickFolder() {
+        try {
+          const d = await api.fetchApi("/krea2_onenode/pick_folder").then(r => r.json());
+          if (d.cancelled) return;
+          if (!d.ok) { setStatus(`Picker error: ${d.error}`, C.err); return; }
+          S.up.folder = d.path; persist();
+          await refreshUpFolder();
+        } catch (e) { setStatus(`Picker failed: ${e.message}`, C.err); }
+      }
+      left.appendChild(upBox);
+      if (S.up.folder) refreshUpFolder(); else syncUpSource();
+
       // SIZE — named preset dropdown + orientation toggle; W/H boxes only for
       // Custom. Presets store landscape base dims; "port" swaps them.
-      left.appendChild(cap("Size"));
+      const sizeCap = cap("Size");
+      left.appendChild(sizeCap);
       const dims = () => {
         if (S.presetIdx === CUSTOM) return { w: S.customW, h: S.customH };
         const p = PRESETS[S.presetIdx];
@@ -879,7 +946,7 @@ app.registerExtension({
       function syncSize() {
         const d = dims();
         wIn.value = d.w; hIn.value = d.h;
-        whRow.style.display = S.presetIdx === CUSTOM ? "flex" : "none";
+        whRow.style.display = S.presetIdx === CUSTOM && S.tab !== "upscale" ? "flex" : "none";
         const sq = S.presetIdx !== CUSTOM && PRESETS[S.presetIdx].square;
         orientBtn.disabled = sq;
         orientBtn.style.opacity = sq ? ".35" : "1";
@@ -1020,13 +1087,11 @@ app.registerExtension({
         seedIn.style.opacity = S.randomizeSeed ? ".45" : "1";
         reuseBtn.style.opacity = S.lastSeed != null ? "1" : ".4";
       }
-      {
-        const seedRow = mk("div", { display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "7px", alignItems: "center" });
-        seedRow.appendChild(advCap("Seed"));
-        seedIn.style.width = "100%"; seedIn.style.minWidth = "0"; seedIn.style.boxSizing = "border-box";
-        seedRow.append(seedIn, noDrag(randChip), noDrag(reuseBtn));
-        advPanel.appendChild(seedRow);
-      }
+      const seedRowEl = mk("div", { display: "grid", gridTemplateColumns: "auto 1fr auto auto", gap: "7px", alignItems: "center" });
+      seedRowEl.appendChild(advCap("Seed"));
+      seedIn.style.width = "100%"; seedIn.style.minWidth = "0"; seedIn.style.boxSizing = "border-box";
+      seedRowEl.append(seedIn, noDrag(randChip), noDrag(reuseBtn));
+      advPanel.appendChild(seedRowEl);
       syncSeedUI();
 
       // pass 2
@@ -1068,13 +1133,28 @@ app.registerExtension({
       // with no UI control, per user preference.)
       advPanel.append(advT2I2, advQ2);
 
+      // Upscale tab section: model picker + soft-blend strength (no seed —
+      // the pipeline has no sampler).
+      const advU = advSec();
+      advU.appendChild(advDivider("Upscale"));
+      const upModelDD = DD(() => S._models.upscale_models, S.up.model,
+        v => { S.up.model = v; persist(); },
+        f => f.replace(/\.safetensors$/i, ""));
+      advU.appendChild(advGrid(["Model", upModelDD]));
+      const upBlend = DragNI(S.up.blend, 0, 1, 0.05, v => { S.up.blend = v; persist(); }, "48px");
+      upBlend.title = "Soft blend — 0 = raw model output, 0.65 = workflow default (65% bilinear)";
+      advU.appendChild(advGrid(["Blend", upBlend]));
+      advPanel.appendChild(advU);
+
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
-        const q = S.tab === "t2iq";
-        advT2I1.style.display = q ? "none" : "flex";
-        advT2I2.style.display = q ? "none" : "flex";
-        advQ1.style.display = q ? "flex" : "none";
-        advQ2.style.display = q ? "flex" : "none";
+        const q = S.tab === "t2iq", up = S.tab === "upscale";
+        advT2I1.style.display = q || up ? "none" : "flex";
+        advT2I2.style.display = q || up ? "none" : "flex";
+        advQ1.style.display = q && !up ? "flex" : "none";
+        advQ2.style.display = q && !up ? "flex" : "none";
+        advU.style.display = up ? "flex" : "none";
+        seedRowEl.style.display = up ? "none" : "grid";
       };
       syncAdv();
 
@@ -1312,16 +1392,24 @@ app.registerExtension({
       // Tab switching: one shared skeleton, scene swaps the T2I batch control,
       // prompt bar and Generate label for the prompt-list column + estimate.
       function syncTab() {
-        const scene = S.tab === "scene";
+        const scene = S.tab === "scene", up = S.tab === "upscale";
         setPillActive(pillT2I, S.tab === "t2i");
         setPillActive(pillQ, S.tab === "t2iq");
         setPillActive(pillScene, scene);
-        batchDD.style.display = scene ? "none" : "";
+        setPillActive(pillUp, up);
+        batchDD.style.display = scene || up ? "none" : "";
         sceneCol.style.display = scene ? "flex" : "none";
-        promptWrap.style.display = scene ? "none" : "";
+        promptWrap.style.display = scene || up ? "none" : "";
         estimateLine.style.display = scene ? "" : "none";
+        // Upscale tab swaps the generation controls for the source box.
+        upBox.style.display = up ? "flex" : "none";
+        sizeCap.style.display = up ? "none" : "";
+        sizeRow.style.display = up ? "none" : "flex";
+        finalTxt.style.display = up ? "none" : "";
+        loraBox.style.display = up ? "none" : "flex";
+        if (up) whRow.style.display = "none";   // else syncSize() below decides
         if (!S._generating) {
-          tx(genBtn, scene ? "Run Scene" : "Generate");
+          tx(genBtn, scene ? "Run Scene" : up ? "Upscale" : "Generate");
           genBtn.appendChild(genSweep);
         }
         if (scene) updateEstimate();
@@ -1672,6 +1760,7 @@ app.registerExtension({
             text_encoders: d.text_encoders || [],
             vaes: d.vaes || [],
             loras: d.loras || [],
+            upscale_models: d.upscale_models || [],
           };
           if (showStatus) setStatus("Model lists refreshed.", C.ok);
         }).catch(() => { if (showStatus) setStatus("Model refresh failed.", C.err); });
