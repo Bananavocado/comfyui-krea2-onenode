@@ -841,11 +841,101 @@ app.registerExtension({
         Toggle(S.advancedUI, v => { S.advancedUI = v; persist(); syncAdv(); }));
       left.appendChild(advTogRow);
 
-      // ── UPSCALE tab: source folder + factor (shown instead of Size/LoRAs) ──
+      // ── UPSCALE tab: drop zone + source folder + factor ────────────────────
       const upBox = mk("div", { display: "none", flexDirection: "column", gap: "8px" });
       upBox.appendChild(cap("Source"));
+
+      // Drop zone — primary input. Drag images or a folder in, or click to
+      // browse files. Dropped items upload straight to ComfyUI's input via
+      // /upload/image; browsers hide their on-disk path, so drops can't
+      // copy results back beside the source — the native Choose Folder flow
+      // below remains the copy-back path. Choosing one source clears the other.
+      const IMG_RE = /\.(png|jpe?g|webp)$/i;
+      const upFileInput = mk("input", { display: "none" },
+        { type: "file", multiple: true, accept: ".png,.jpg,.jpeg,.webp" });
+      const dz = mk("div", {
+        border: `1.5px dashed ${C.borderH}`, borderRadius: "10px",
+        padding: "16px 10px", textAlign: "center", cursor: "pointer",
+        transition: "border-color .15s, background .15s", position: "relative",
+        boxSizing: "border-box", userSelect: "none",
+      });
+      const dzIcon = tx(mk("div", { fontSize: "15px", color: C.muted, marginBottom: "3px", pointerEvents: "none" }), "⇣");
+      const dzMain = tx(mk("div", { fontSize: "10px", fontWeight: "700", color: C.text, pointerEvents: "none" }), "Drag & drop images or a folder");
+      const dzSub = tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "3px", pointerEvents: "none" }), "or click to browse files");
+      const dzClear = mk("button", {
+        position: "absolute", top: "4px", right: "6px", background: "none",
+        border: "none", cursor: "pointer", color: C.muted, fontSize: "12px",
+        outline: "none", display: "none", padding: "2px",
+      }, { title: "Clear dropped images" });
+      tx(dzClear, "✕");
+      dzClear.onmouseenter = () => dzClear.style.color = C.err;
+      dzClear.onmouseleave = () => dzClear.style.color = C.muted;
+      dzClear.onclick = (e) => { e.stopPropagation(); S._upDrop = null; syncUpSource(); };
+      dz.append(dzIcon, dzMain, dzSub, dzClear, upFileInput);
+      dz.onmouseenter = () => { if (!dz._drag) dz.style.borderColor = C.text; };
+      dz.onmouseleave = () => { if (!dz._drag) dz.style.borderColor = C.borderH; };
+      dz.onclick = (e) => { e.stopPropagation(); upFileInput.click(); };
+      upFileInput.addEventListener("change", () => {
+        setDropFiles([...upFileInput.files]);
+        upFileInput.value = "";
+      });
+      const dzDragOn = (on) => {
+        dz._drag = on;
+        dz.style.borderColor = on ? LIME : C.borderH;
+        dz.style.background = on ? "rgba(240,255,65,.05)" : "";
+      };
+      for (const ev of ["dragenter", "dragover"]) {
+        dz.addEventListener(ev, (e) => { e.preventDefault(); e.stopPropagation(); dzDragOn(true); });
+      }
+      dz.addEventListener("dragleave", (e) => { e.stopPropagation(); dzDragOn(false); });
+      dz.addEventListener("drop", async (e) => {
+        e.preventDefault(); e.stopPropagation();   // keep ComfyUI's workflow-load drop handler out
+        dzDragOn(false);
+        try { setDropFiles(await filesFromDrop(e.dataTransfer)); }
+        catch (err) { setStatus(`Drop failed: ${err.message}`, C.err); }
+      });
+      noDrag(dz);
+      // Resolve a drop into File objects: plain files pass through, a dropped
+      // folder is read one level deep (same top-level-only rule as list_folder).
+      async function filesFromDrop(dt) {
+        const entries = [...(dt.items || [])].map(i => i.webkitGetAsEntry?.()).filter(Boolean);
+        if (!entries.length) return [...(dt.files || [])].filter(f => IMG_RE.test(f.name));
+        const entFile = (ent) => new Promise(res => ent.file(res, () => res(null)));
+        const out = [];
+        for (const ent of entries) {
+          if (ent.isFile) {
+            const f = await entFile(ent);
+            if (f && IMG_RE.test(f.name) && !f.name.startsWith(".")) out.push(f);
+          } else if (ent.isDirectory) {
+            const reader = ent.createReader();
+            let batch;
+            do {   // readEntries returns ≤100 per call — drain it
+              batch = await new Promise(res => reader.readEntries(res, () => res([])));
+              for (const e2 of batch) {
+                if (!e2.isFile) continue;
+                const f = await entFile(e2);
+                if (f && IMG_RE.test(f.name) && !f.name.startsWith(".")) out.push(f);
+              }
+            } while (batch.length);
+          }
+        }
+        return out;
+      }
+      function setDropFiles(files) {
+        const seen = new Set();
+        const list = (files || []).filter(f => !seen.has(f.name) && seen.add(f.name));
+        if (!list.length) { setStatus("No usable images (png/jpg/webp).", C.err); return; }
+        S._upDrop = list;
+        S.up.folder = null;     // drops replace the folder source
+        S._upFiles = undefined;
+        persist();
+        syncUpSource();
+      }
+      upBox.appendChild(dz);
+
       const upPickChip = LimeChip("Choose Folder…", () => doPickFolder());
       upPickChip.style.alignSelf = "flex-start";
+      upPickChip.title = "Native folder picker — results also copy back into <folder>/upscaled/";
       upBox.appendChild(upPickChip);
       const upPathTxt = mk("div", {
         fontSize: "10px", color: C.muted, whiteSpace: "nowrap",
@@ -867,13 +957,27 @@ app.registerExtension({
       function syncUpFactor() { facPills.forEach(p => setPillActive(p, S.up.factor === p._factor)); }
       upBox.appendChild(upFacRow);
       const syncUpSource = () => {
-        tx(upPathTxt, S.up.folder || "No folder chosen");
+        const drop = S._upDrop;
+        if (drop?.length) {
+          tx(dzMain, `${drop.length} image${drop.length > 1 ? "s" : ""} ready`);
+          dzMain.style.color = LIME;
+          tx(dzSub, "drop or click to pick different files");
+          dzClear.style.display = "";
+        } else {
+          tx(dzMain, "Drag & drop images or a folder");
+          dzMain.style.color = C.text;
+          tx(dzSub, "or click to browse files");
+          dzClear.style.display = "none";
+        }
+        tx(upPathTxt, S.up.folder || "");
+        upPathTxt.style.display = S.up.folder ? "" : "none";
         upPathTxt.title = S.up.folder || "";
         const f = S._upFiles;
         tx(upCountTxt, !S.up.folder ? ""
           : f === null ? "Choose the folder again (server restarted)"
           : f === undefined ? "…"
           : `${f.length} image${f.length === 1 ? "" : "s"}`);
+        upCountTxt.style.display = S.up.folder ? "" : "none";
         upCountTxt.style.color = f === null ? C.warn : "rgba(240,255,65,.55)";
       };
       async function refreshUpFolder() {
@@ -891,7 +995,9 @@ app.registerExtension({
           const d = await api.fetchApi("/krea2_onenode/pick_folder").then(r => r.json());
           if (d.cancelled) return;
           if (!d.ok) { setStatus(`Picker error: ${d.error}`, C.err); return; }
-          S.up.folder = d.path; persist();
+          S.up.folder = d.path;
+          S._upDrop = null;     // the folder replaces any dropped files
+          persist();
           await refreshUpFolder();
         } catch (e) { setStatus(`Picker failed: ${e.message}`, C.err); }
       }
@@ -2574,43 +2680,61 @@ app.registerExtension({
           await submitUpscaleJobs([{ imageName: annotatedName(img), factor, before: img }]);
         } finally { S._submitting = false; }
       }
+      // Stage one source image into ComfyUI's input via the official upload
+      // API and return the job fields that identify it.
+      async function uploadSource(file) {
+        const fd = new FormData();
+        fd.append("image", file);
+        fd.append("subfolder", "krea2-onenode-src");
+        fd.append("overwrite", "true");
+        const ur = await api.fetchApi("/upload/image", { method: "POST", body: fd });
+        if (!ur.ok) throw new Error(`upload ${ur.status}`);
+        const ud = await ur.json();
+        const sub = ud.subfolder || "krea2-onenode-src";
+        return {
+          imageName: (sub ? sub + "/" : "") + ud.name,
+          before: { filename: ud.name, subfolder: sub, type: "input" },
+        };
+      }
       async function doRunUpscaleBatch() {
         if (S._submitting) return;
         if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
-        if (!S.up.folder) { setStatus("Choose a source folder first.", C.err); return; }
+        const drop = S._upDrop;
+        if (!drop?.length && !S.up.folder) { setStatus("Drop images or choose a folder first.", C.err); return; }
         S._submitting = true;
         try {
-          await refreshUpFolder();
-          const files = S._upFiles;
-          if (files == null) { setStatus("Folder not authorized — choose it again.", C.err); return; }
-          if (!files.length) { setStatus("No images in the folder.", C.err); return; }
-          // Stage each source into ComfyUI's input via the official upload API
-          // (the backend only hands us the bytes — no direct folder writes).
-          setStatus(`Uploading ${files.length} image${files.length > 1 ? "s" : ""}…`);
           const jobs = [];
           let skipped = 0;
-          for (const name of files) {
-            try {
-              const r = await api.fetchApi(
-                `/krea2_onenode/read_file?path=${encodeURIComponent(S.up.folder)}&name=${encodeURIComponent(name)}`);
-              if (!r.ok) throw new Error(`read ${r.status}`);
-              const blob = await r.blob();
-              const fd = new FormData();
-              fd.append("image", new File([blob], name, { type: blob.type || "image/png" }));
-              fd.append("subfolder", "krea2-onenode-src");
-              fd.append("overwrite", "true");
-              const ur = await api.fetchApi("/upload/image", { method: "POST", body: fd });
-              if (!ur.ok) throw new Error(`upload ${ur.status}`);
-              const ud = await ur.json();
-              const sub = ud.subfolder || "krea2-onenode-src";
-              jobs.push({
-                imageName: (sub ? sub + "/" : "") + ud.name,
-                factor: S.up.factor,
-                before: { filename: ud.name, subfolder: sub, type: "input" },
-                copyTo: { dest_dir: S.up.folder, dest_name: "up_" + name },
-                forceSave: true,
-              });
-            } catch (e) { skipped++; }
+          if (drop?.length) {
+            // Dropped/browsed files — the browser hands us the bytes directly;
+            // no on-disk path, so no copy-back for these.
+            setStatus(`Uploading ${drop.length} image${drop.length > 1 ? "s" : ""}…`);
+            for (const f of drop) {
+              try {
+                jobs.push({ ...(await uploadSource(f)), factor: S.up.factor, forceSave: true });
+              } catch (e) { skipped++; }
+            }
+          } else {
+            await refreshUpFolder();
+            const files = S._upFiles;
+            if (files == null) { setStatus("Folder not authorized — choose it again.", C.err); return; }
+            if (!files.length) { setStatus("No images in the folder.", C.err); return; }
+            // Backend only hands us the bytes — no direct folder writes here.
+            setStatus(`Uploading ${files.length} image${files.length > 1 ? "s" : ""}…`);
+            for (const name of files) {
+              try {
+                const r = await api.fetchApi(
+                  `/krea2_onenode/read_file?path=${encodeURIComponent(S.up.folder)}&name=${encodeURIComponent(name)}`);
+                if (!r.ok) throw new Error(`read ${r.status}`);
+                const blob = await r.blob();
+                jobs.push({
+                  ...(await uploadSource(new File([blob], name, { type: blob.type || "image/png" }))),
+                  factor: S.up.factor,
+                  copyTo: { dest_dir: S.up.folder, dest_name: "up_" + name },
+                  forceSave: true,
+                });
+              } catch (e) { skipped++; }
+            }
           }
           if (!jobs.length) { setStatus("Every file failed to upload.", C.err); return; }
           if (skipped) setStatus(`${skipped} file${skipped > 1 ? "s" : ""} failed to upload — upscaling ${jobs.length}.`, C.warn);
