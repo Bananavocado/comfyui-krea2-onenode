@@ -1177,9 +1177,9 @@ app.registerExtension({
       const mpDD = DD(() => [1, 1.5, 2.25], S.edit.mp,
         v => { S.edit.mp = v; persist(); syncEditUI(); },
         v => `${v} MP${v === 1 ? " (recommended)" : ""}`);
-      const mpWrap = mk("div", { flex: "1", minWidth: "0" });
-      mpWrap.appendChild(mpDD);
-      editOutRow.append(editOutCap, mpWrap);
+      const mpDDWrap = mk("div", { flex: "1", minWidth: "0" });
+      mpDDWrap.appendChild(mpDD);
+      editOutRow.append(editOutCap, mpDDWrap);
       const editDimsTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
       editBox.append(editOutRow, editDimsTxt);
 
