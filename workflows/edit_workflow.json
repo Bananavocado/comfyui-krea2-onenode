@@ -158,51 +158,6 @@
     "class_type": "ResizeImageMaskNode",
     "_meta": { "title": "Mask → output dims" }
   },
-  "K2E:grow": {
-    "inputs": {
-      "mask": ["K2E:mresize", 0],
-      "expand": 8,
-      "tapered_corners": true
-    },
-    "class_type": "GrowMask",
-    "_meta": { "title": "Grow mask" }
-  },
-  "K2E:m2i": {
-    "inputs": {
-      "mask": ["K2E:grow", 0]
-    },
-    "class_type": "MaskToImage",
-    "_meta": { "title": "Mask → image" }
-  },
-  "K2E:blur": {
-    "inputs": {
-      "image": ["K2E:m2i", 0],
-      "blur_radius": 6,
-      "sigma": 2.5
-    },
-    "class_type": "ImageBlur",
-    "_meta": { "title": "Feather mask" }
-  },
-  "K2E:i2m": {
-    "inputs": {
-      "image": ["K2E:blur", 0],
-      "channel": "red"
-    },
-    "class_type": "ImageToMask",
-    "_meta": { "title": "Image → mask" }
-  },
-  "K2E:comp": {
-    "inputs": {
-      "destination": ["K2E:resize", 0],
-      "source": ["K2E:decode", 0],
-      "x": 0,
-      "y": 0,
-      "resize_source": false,
-      "mask": ["K2E:i2m", 0]
-    },
-    "class_type": "ImageCompositeMasked",
-    "_meta": { "title": "Composite (edit inside mask only)" }
-  },
   "K2E:imgb": {
     "inputs": {
       "image": "person.png"
@@ -231,7 +186,7 @@
   "K2E:save": {
     "inputs": {
       "filename_prefix": "krea2-onenode/edit",
-      "images": ["K2E:comp", 0]
+      "images": ["K2E:decode", 0]
     },
     "class_type": "SaveImage",
     "_meta": { "title": "Save" }

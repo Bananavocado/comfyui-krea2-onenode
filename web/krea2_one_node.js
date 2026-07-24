@@ -88,7 +88,6 @@ function defaultState() {
       mode: "none", mp: 1,
       refBoost: 4, refBoostA: 1, fitMode: "fit", groundingPx: 768,
       steps: 10, cfg: 1, sampler: "euler", scheduler: "simple", denoise: 1,
-      growPx: 8, blurRad: 6,
     },
     tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale" | "edit"
     sceneRows: [{ prompt: "", batch: 1 }],
@@ -111,6 +110,7 @@ function loadState() {
     delete s.up.model; delete s.up.blend; delete s.up.mode; delete s.up.factor;
     if (!["1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
     s.edit = Object.assign(defaultState().edit, s.edit || {});
+    delete s.edit.growPx; delete s.edit.blurRad;   // stale: composite chain removed
     if (!["none", "mask", "ref"].includes(s.edit.mode)) s.edit.mode = "none";
     if (![1, 1.5, 2.25].includes(s.edit.mp)) s.edit.mp = 1;
     if (!["t2i", "t2iq", "scene", "upscale", "edit"].includes(s.tab)) s.tab = "t2i";
@@ -1545,15 +1545,6 @@ app.registerExtension({
         v => { S.edit.denoise = isFinite(v) ? Math.min(1, Math.max(0.05, v)) : 1; persist(); });
       advE.appendChild(advGrid(
         [capI("Denoise", "1 = full re-render of the output canvas (normal for edits — your image steers the model through the reference patch, not the latent)."), eDen]));
-      // Mask processing — visible only while Mask mode is on.
-      const advEMask = advSec();
-      advEMask.appendChild(advDivider("Mask"));
-      const eGrow = NI(S.edit.growPx, 0, 128, 1, v => { S.edit.growPx = Math.max(0, Math.min(128, Math.round(v || 0))); persist(); });
-      const eBlur = NI(S.edit.blurRad, 1, 31, 1, v => { S.edit.blurRad = Math.max(1, Math.min(31, Math.round(v || 6))); persist(); });
-      advEMask.appendChild(advGrid(
-        [capI("Grow", "Expands the painted mask outward by N px before feathering — gives the edit room to blend past the exact brush edge (source workflow: 8)."), eGrow],
-        [capI("Feather", "Blur radius for the mask edge — soft transition between edited and original pixels (source workflow: 6, sigma 2.5)."), eBlur]));
-      advE.appendChild(advEMask);
       advPanel.appendChild(advE);
 
       const syncAdv = () => {
@@ -1565,7 +1556,6 @@ app.registerExtension({
         advQ2.style.display = q && !up ? "flex" : "none";
         advU.style.display = up ? "flex" : "none";
         advE.style.display = ed ? "flex" : "none";
-        advEMask.style.display = S.edit.mode === "mask" ? "flex" : "none";
         seedRowEl.style.display = up ? "none" : "grid";
       };
       syncAdv();
@@ -3339,17 +3329,19 @@ app.registerExtension({
         k.sampler_name = S.edit.sampler;
         k.scheduler = S.edit.scheduler;
         k.denoise = S.edit.denoise;
+        // Mask mode: the painted region feeds ref_boost_mask ONLY — the model
+        // does the masked edit internally and the RAW RENDER is the result
+        // (matches the source workflow, whose Save Image / Image Comparer sit
+        // on the decode; its "Maskin Image" hard composite is deliberately
+        // not reproduced — pixel-pasting gave unblended, misaligned seams).
         if (S.edit.mode === "mask") {
           p["K2E:mask"].inputs.image = o.maskName;
           p["K2E:mresize"].inputs["resize_type.width"] = d.w;
           p["K2E:mresize"].inputs["resize_type.height"] = d.h;
-          p["K2E:grow"].inputs.expand = S.edit.growPx;
-          p["K2E:blur"].inputs.blur_radius = S.edit.blurRad;
-          // save ← composite (template default) — composite only, by design
         } else {
-          for (const kk of ["mask", "mresize", "grow", "m2i", "blur", "i2m", "comp"]) delete p["K2E:" + kk];
+          delete p["K2E:mask"];
+          delete p["K2E:mresize"];
           delete pt.ref_boost_mask;
-          p["K2E:save"].inputs.images = ["K2E:decode", 0];
         }
         if (S.edit.mode === "ref") {
           p["K2E:imgb"].inputs.image = o.refName;
