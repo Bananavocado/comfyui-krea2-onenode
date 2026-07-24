@@ -685,11 +685,44 @@ app.registerExtension({
       this.outputs = [];
       if (this.widgets) this.widgets = [];
       this.addOutput("image", "IMAGE");
+      // No _k2Init here: node.id is still -1 and properties aren't restored yet.
+    };
+    // Hook order (measured): onNodeCreated(id -1) → onAdded(real id, no
+    // properties) → onConfigure(id + properties). Workflow loads always reach
+    // onConfigure, so build there; a node added from the menu never gets one,
+    // hence the deferred onAdded fallback (a timeout, not rAF — rAF is frozen
+    // in background tabs, and it lands after configure in the same task).
+    nodeType.prototype.onConfigure = function () { this._k2Init(); };
+    nodeType.prototype.onAdded = function () { setTimeout(() => this._k2Init(), 0); };
 
+    // Cache key: a uuid kept in node.properties (serialized with the workflow).
+    // node.id can't be used — it is -1 inside onNodeCreated, and it is only
+    // unique within ONE workflow, so two workflows would share a dashboard.
+    const K2_UID = "k2_uid";
+    const newUid = () => (crypto?.randomUUID?.() || `k2-${Math.random().toString(36).slice(2)}`);
+
+    nodeType.prototype._k2Uid = function () {
+      if (!this.properties) this.properties = {};
+      let uid = this.properties[K2_UID];
+      const cached = uid && window.__krea2_nodes[uid];
+      // A copy/pasted node inherits the uid; if the original owner is still
+      // live in the graph, mint a fresh uid so they don't share one dashboard.
+      if (cached && cached.currentNode !== this &&
+          app.graph?.getNodeById?.(cached.currentNode?.id) === cached.currentNode) uid = null;
+      if (!uid) { uid = newUid(); this.properties[K2_UID] = uid; }
+      return uid;
+    };
+
+    nodeType.prototype._k2Init = function () {
+      if (this._k2Ready) return;
+      if (this.id == null || this.id === -1) return;   // not in a graph yet
+      this._k2Ready = true;
       if (!window.__krea2_nodes) window.__krea2_nodes = {};
-      const cached = window.__krea2_nodes[this.id];
+      const uid = this._k2uid = this._k2Uid();
+      const cached = window.__krea2_nodes[uid];
       if (cached) {
         cached.currentNode = this;
+        cached.S._node = this;
         this._mountUI(cached.root);
         return;
       }
@@ -2979,7 +3012,7 @@ app.registerExtension({
         } catch (e) {}
       }
       function pushOutput(img) {
-        const nodeId = (window.__krea2_nodes && Object.entries(window.__krea2_nodes).find(([, v]) => v.S === S)?.[0]) ?? self.id;
+        const nodeId = S._node?.id ?? self.id;   // cache is uid-keyed now
         api.fetchApi("/krea2_onenode/set_output", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ node_id: String(nodeId), ...img }),
@@ -3661,14 +3694,8 @@ app.registerExtension({
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
-      window.__krea2_nodes[this.id] = { root, S, currentNode: this };
-      requestAnimationFrame(() => {
-        const staleKey = -1;
-        if (window.__krea2_nodes[staleKey] && self.id !== staleKey) {
-          window.__krea2_nodes[self.id] = window.__krea2_nodes[staleKey];
-          delete window.__krea2_nodes[staleKey];
-        }
-      });
+      S._node = this;   // live node ref (id changes across workflow reloads)
+      window.__krea2_nodes[this._k2uid || this._k2Uid()] = { root, S, currentNode: this };
       this._mountUI(root);
     };
   },
