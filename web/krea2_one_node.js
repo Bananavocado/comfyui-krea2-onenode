@@ -1873,6 +1873,7 @@ app.registerExtension({
           saveChip.style.display = "none";
           clearChip.style.display = "none";
           upChip.style.display = "none";
+          useAsChip.style.display = "none";
           cmpChip.style.display = "none";
           cmpWrap.style.display = "none";
         }
@@ -2172,8 +2173,9 @@ app.registerExtension({
       clearChip.title = "Clear the result from this node (files on disk are untouched)";
       const saveChip = DarkChip("Save", () => doSaveTemp());
       saveChip.style.display = "none";
-      const useAsChip = DarkChip("Use as…  ▾", null, true);
-      useAsChip.title = "Send to I2I / Edit — coming with those modes";
+      const useAsChip = DarkChip("Use as…  ▾", () => openUseAsMenu(useAsChip));
+      useAsChip.style.display = "none";
+      useAsChip.title = "Send this result to the Edit tab (source or person reference)";
       overlayTR.append(cmpChip, upChip, clearChip, saveChip, useAsChip);
       right.appendChild(overlayTR);
 
@@ -2502,6 +2504,7 @@ app.registerExtension({
         saveChip.style.display = img.type === "temp" ? "" : "none";
         clearChip.style.display = "";
         upChip.style.display = "";
+        useAsChip.style.display = "";
         syncCompare();
         pushOutput(img);
         syncThumbSel();
@@ -2607,6 +2610,40 @@ app.registerExtension({
       }
       // 2× / 4× picker for the viewer's ⤢ Upscale chip (reuses the ctx menu
       // container, anchored under the chip).
+      // "Use as…" — send the current result into the EDIT tab. view-kind
+      // sources feed LoadImage the annotated "subfolder/file [type]" name,
+      // so no re-upload happens.
+      function sendToEdit(img, slot) {
+        const im = new Image();
+        im.onload = () => {
+          const v = { kind: "view", img, name: img.filename, w: im.naturalWidth, h: im.naturalHeight };
+          if (slot === "ref") {
+            setEditRef(v);
+            S.edit.mode = "ref";   // person slot implies Reference mode
+          } else {
+            setEditSource(v);      // also drops any painted mask
+          }
+          persist();
+          if (S.tab !== "edit") setTab("edit");
+          else { syncEditUI(); syncAdv(); }
+          setStatus(slot === "ref" ? "Sent to Edit as the person reference." : "Sent to Edit as the source image.");
+        };
+        im.onerror = () => setStatus("Couldn't load that image.", C.err);
+        im.src = viewUrl(img);
+      }
+      function openUseAsMenu(anchor) {
+        const img = S.lastImage;
+        if (!img?.filename) return;
+        ctxMenu.replaceChildren(
+          ctxItem("✎", "Edit — source image", () => sendToEdit(img, "src")),
+          ctxItem("👤", "Edit — person (reference)", () => sendToEdit(img, "ref")),
+        );
+        const r = anchor.getBoundingClientRect();
+        ctxMenu.style.left = Math.min(r.left, window.innerWidth - 220) + "px";
+        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 90) + "px";
+        ctxMenu.style.display = "flex";
+        document.addEventListener("pointerdown", ctxDoc, true);
+      }
       function openUpscaleMenu(anchor) {
         const img = S.lastImage;
         if (!img?.filename) return;
@@ -3472,9 +3509,11 @@ app.registerExtension({
         saveChip.style.display = "none";
         clearChip.style.display = "none";
         upChip.style.display = "none";
+        useAsChip.style.display = "none";
         cmpChip.style.display = "none";
         cmpWrap.style.display = "none";
         S._cmp.clear();
+        S._pfx.clear();
         S._cmpOn = false;
         thumbScroller.replaceChildren();
         thumbStrip.style.display = "none";
@@ -3524,6 +3563,7 @@ app.registerExtension({
         saveChip.style.display = S.lastImage.type === "temp" ? "" : "none";
         clearChip.style.display = "";
         upChip.style.display = "";
+        useAsChip.style.display = "";
       }
 
       // ── mount + cache ──────────────────────────────────────────────────────
