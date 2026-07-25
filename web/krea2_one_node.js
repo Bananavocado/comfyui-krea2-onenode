@@ -2708,10 +2708,7 @@ app.registerExtension({
           { name: "…_v1_2_r128", url: `${IDE}/krea2_identity_edit_v1_2_r128.safetensors` },
           { name: "…_v1_2_r64", url: `${IDE}/krea2_identity_edit_v1_2_r64.safetensors` },
         ], "Required by the EDIT tab (hardwired at strength 1.0, no UI control). r128/r64 are the smaller low-VRAM ranks — rename to krea2_identity_edit_v1_2.safetensors or edit workflows/edit_workflow.json."),
-        helpRow("Upscale (cloud)", "→ none (API)", [
-          { name: "fal.ai · SeedVR2 upscale", url: "https://fal.ai/models/fal-ai/seedvr/upscale/image" },
-        ], "What the UPSCALE tab calls today — nothing to download, but it is a PAID API call per image and needs a FAL_KEY in the fal-api node pack's config.ini."),
-        helpRow("Upscale (local)", "→ models/SEEDVR2/", [
+        helpRow("Upscale Model", "→ models/SEEDVR2/", [
           { name: "numz/SeedVR2_comfyUI", url: `${HF}/numz/SeedVR2_comfyUI/tree/main` },
         ], "Run SeedVR2 on your own GPU instead (RunPod etc.): grab the 3b or 7b weights + ema_vae, install numz/ComfyUI-SeedVR2_VideoUpscaler, and swap the fal node out of workflows/upscale_workflow.json."),
       );
