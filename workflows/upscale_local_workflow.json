@@ -1,0 +1,96 @@
+{
+  "K2UL:img": {
+    "inputs": { "image": "example.png" },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Source image" }
+  },
+  "K2UL:join": {
+    "inputs": { "image": ["K2UL:img", 0], "alpha": ["K2UL:img", 1] },
+    "class_type": "JoinImageWithAlpha",
+    "_meta": { "title": "Join alpha" }
+  },
+  "K2UL:resize": {
+    "inputs": {
+      "resize_type": "scale by multiplier",
+      "resize_type.multiplier": 2,
+      "scale_method": "lanczos",
+      "input": ["K2UL:join", 0]
+    },
+    "class_type": "ResizeImageMaskNode",
+    "_meta": { "title": "Scale ×factor" }
+  },
+  "K2UL:pre": {
+    "inputs": { "resized_images": ["K2UL:resize", 0] },
+    "class_type": "SeedVR2Preprocess",
+    "_meta": { "title": "SeedVR2 preprocess" }
+  },
+  "K2UL:vae": {
+    "inputs": { "vae_name": "ema_vae_fp16.safetensors" },
+    "class_type": "VAELoader",
+    "_meta": { "title": "SeedVR2 VAE" }
+  },
+  "K2UL:unet": {
+    "inputs": { "unet_name": "seedvr2_3b_fp16.safetensors", "weight_dtype": "default" },
+    "class_type": "UNETLoader",
+    "_meta": { "title": "SeedVR2 model" }
+  },
+  "K2UL:enc": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 128,
+      "temporal_size": 4096,
+      "temporal_overlap": 8,
+      "pixels": ["K2UL:pre", 0],
+      "vae": ["K2UL:vae", 0]
+    },
+    "class_type": "VAEEncodeTiled",
+    "_meta": { "title": "Tiled encode" }
+  },
+  "K2UL:cond": {
+    "inputs": { "model": ["K2UL:unet", 0], "vae_conditioning": ["K2UL:enc", 0] },
+    "class_type": "SeedVR2Conditioning",
+    "_meta": { "title": "SeedVR2 conditioning" }
+  },
+  "K2UL:sampler": {
+    "inputs": {
+      "seed": 0,
+      "steps": 1,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": ["K2UL:unet", 0],
+      "positive": ["K2UL:cond", 0],
+      "negative": ["K2UL:cond", 1],
+      "latent_image": ["K2UL:enc", 0]
+    },
+    "class_type": "KSampler",
+    "_meta": { "title": "SeedVR2 sampler" }
+  },
+  "K2UL:dec": {
+    "inputs": {
+      "tile_size": 512,
+      "overlap": 128,
+      "temporal_size": 4096,
+      "temporal_overlap": 8,
+      "samples": ["K2UL:sampler", 0],
+      "vae": ["K2UL:vae", 0]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": { "title": "Tiled decode" }
+  },
+  "K2UL:post": {
+    "inputs": {
+      "color_correction_method": "wavelet",
+      "images": ["K2UL:dec", 0],
+      "original_resized_images": ["K2UL:resize", 0]
+    },
+    "class_type": "SeedVR2PostProcessing",
+    "_meta": { "title": "SeedVR2 post" }
+  },
+  "K2UL:save": {
+    "inputs": { "filename_prefix": "krea2-onenode/up", "images": ["K2UL:post", 0] },
+    "class_type": "SaveImage",
+    "_meta": { "title": "Save" }
+  }
+}

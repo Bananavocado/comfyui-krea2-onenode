@@ -75,9 +75,18 @@ function defaultState() {
       denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
       grain: 0.09, grainOn: true, sharpen: 1, sharpenOn: true,
     },
-    // Upscale tab (SeedVR2 via fal.ai API — paid per call): fixed target
-    // resolution; noise 0.1 = node default.
-    up: { resolution: "2160p", noise: 0.1, folder: null },
+    // Upscale tab. Two engines: "cloud" = SeedVR2 on fal.ai (paid per call,
+    // fixed target resolution, noise 0.1 = node default) and "local" = the
+    // same model run on your own GPU through ComfyUI's core SeedVR2 nodes
+    // (free, needs the weights on disk). `local` is nested so it can't collide
+    // with the stale up.model/up.factor keys loadState still strips.
+    up: {
+      engine: "cloud", resolution: "2160p", noise: 0.1, folder: null,
+      local: {
+        model: "", vae: "", factor: 2, tile: 512,
+        steps: 1, cfg: 1, sampler: "euler", scheduler: "simple",
+      },
+    },
     // Edit tab (Krea2 Edit / identity-edit): mode "none" = plain I2I edit,
     // "mask" = painted-region edit, "ref" = two-image person-into-scene.
     // Defaults mirror the source workflows (ref_boost 4 = fidelity preset).
@@ -106,6 +115,10 @@ function loadState() {
     // Stale keys from earlier upscaler iterations (4x UltraSharpV2 / factor mode).
     delete s.up.model; delete s.up.blend; delete s.up.mode; delete s.up.factor;
     if (!["1080p", "1440p", "2160p"].includes(s.up.resolution)) s.up.resolution = "2160p";
+    s.up.local = Object.assign(defaultState().up.local, s.up.local || {});
+    if (!["cloud", "local"].includes(s.up.engine)) s.up.engine = "cloud";
+    if (![2, 4, 6, 8].includes(s.up.local.factor)) s.up.local.factor = 2;
+    if (![128, 256, 512].includes(s.up.local.tile)) s.up.local.tile = 512;
     s.edit = Object.assign(defaultState().edit, s.edit || {});
     delete s.edit.growPx; delete s.edit.blurRad;   // stale: composite chain removed
     if (!["none", "mask", "ref"].includes(s.edit.mode)) s.edit.mode = "none";
@@ -507,8 +520,9 @@ if (!window.__krea2_listeners) {
         const s = d.max > plan.p2Start ? plan.p2Start : 0;
         const f = Math.min(1, Math.max(0, (d.value - s) / (d.max - s)));
         a.setStage?.(`Pass 2 · Step ${d.value}/${d.max}`, (plan.split + f * (1 - plan.split)) * 100);
-      } else if (nodeId === "K2U:up") {
-        // fal API node — if it reports progress at all, show a single-stage bar.
+      } else if (nodeId === "K2U:up" || nodeId === "K2UL:sampler") {
+        // Upscale: the fal API node may not report at all; the local SeedVR2
+        // KSampler does. Either way it's a single-stage bar.
         a.setStage?.(`Upscaling · ${d.value}/${d.max}`, (d.value / d.max) * 100);
       } else if (nodeId === "K2E:sampler") {
         // Edit: single KSampler — single-stage bar.
@@ -1009,8 +1023,28 @@ app.registerExtension({
       upPathRow.append(upPathTxt, noDrag(upPathClear));
       const upCountTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
       upBox.append(upPathRow, upCountTxt);
-      const upFacCap = cap("Upscale To"); upFacCap.style.marginTop = "6px"; upFacCap.style.marginBottom = "0";
-      upBox.appendChild(upFacCap);
+      // Engine picker. Cloud = fal.ai API (paid, nothing to download); local =
+      // ComfyUI's core SeedVR2 nodes on your own GPU (free, weights on disk).
+      const upEngCap = cap("Engine"); upEngCap.style.marginTop = "6px"; upEngCap.style.marginBottom = "0";
+      upBox.appendChild(upEngCap);
+      const upEngRow = mk("div", { display: "flex", gap: "5px" });
+      const engPills = [
+        { key: "cloud", label: "☁ CLOUD", tip: "SeedVR2 on fal.ai — no download, but a PAID API call per image (needs FAL_KEY)" },
+        { key: "local", label: "🖥 LOCAL", tip: "SeedVR2 on this machine's GPU — free, needs the SeedVR2 model + VAE on disk" },
+      ].map(({ key, label, tip }) => {
+        const p = Pill(label, S.up.engine === key, () => {
+          S.up.engine = key; persist(); syncUpEngine();
+        });
+        p._key = key; p.title = tip;
+        upEngRow.appendChild(p);
+        return p;
+      });
+      upBox.appendChild(upEngRow);
+
+      // Cloud: target resolution.
+      const upCloudBox = mk("div", { display: "flex", flexDirection: "column", gap: "0" });
+      const upFacCap = cap("Upscale To"); upFacCap.style.marginTop = "8px"; upFacCap.style.marginBottom = "5px";
+      upCloudBox.appendChild(upFacCap);
       const upFacRow = mk("div", { display: "flex", gap: "5px" });
       const UP_RESOLUTIONS = ["1080p", "1440p", "2160p"];
       const facPills = UP_RESOLUTIONS.map(res => {
@@ -1021,8 +1055,73 @@ app.registerExtension({
         upFacRow.appendChild(p);
         return p;
       });
-      function syncUpFactor() { facPills.forEach(p => setPillActive(p, S.up.resolution === p._res)); }
-      upBox.appendChild(upFacRow);
+      function syncUpFactor() {
+        facPills.forEach(p => setPillActive(p, S.up.resolution === p._res));
+        scalePills.forEach(p => setPillActive(p, S.up.local.factor === p._fac));
+      }
+      upCloudBox.appendChild(upFacRow);
+      upBox.appendChild(upCloudBox);
+
+      // Local: scale factor drives ResizeImageMaskNode, SeedVR2 restores the
+      // detail. Model/VAE are the SeedVR2 pair, NOT the Krea 2 ones.
+      const upLocalBox = mk("div", { display: "none", flexDirection: "column", gap: "0" });
+      const upScaleCap = cap("Scale"); upScaleCap.style.marginTop = "8px"; upScaleCap.style.marginBottom = "5px";
+      upLocalBox.appendChild(upScaleCap);
+      const upScaleRow = mk("div", { display: "flex", gap: "5px" });
+      const UP_FACTORS = [2, 4, 6, 8];
+      const scalePills = UP_FACTORS.map(f => {
+        const p = Pill(`${f}×`, S.up.local.factor === f, () => {
+          S.up.local.factor = f; persist(); syncUpFactor();
+        });
+        p._fac = f;
+        upScaleRow.appendChild(p);
+        return p;
+      });
+      upLocalBox.appendChild(upScaleRow);
+      const upRow = (label, ctrl) => {
+        const r = mk("div", { display: "grid", gridTemplateColumns: "62px 1fr", gap: "8px", alignItems: "center", marginTop: "7px" });
+        const l = cap(label); l.style.marginBottom = "0";
+        r.append(l, ctrl);
+        return r;
+      };
+      // SeedVR2 weights live in diffusion_models / vae like any other model, so
+      // the pickers reuse the same lists Settings uses.
+      const upModelDD = DD(() => S._models.diffusion_models, S.up.local.model || null,
+        v => { S.up.local.model = v; persist(); });
+      const upVaeDD = DD(() => S._models.vaes, S.up.local.vae || null,
+        v => { S.up.local.vae = v; persist(); });
+      const upTileDD = DD(() => [512, 256, 128], S.up.local.tile,
+        v => { S.up.local.tile = +v; persist(); }, v => String(v));
+      upLocalBox.append(upRow("Model", upModelDD), upRow("VAE", upVaeDD), upRow("VAE tile", upTileDD));
+      const upTileHint = tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "5px", lineHeight: "1.5" }),
+        "Smaller tiles use less VRAM and run slower. The result is the source × scale, so 4× on a large image gets heavy fast.");
+      upLocalBox.appendChild(upTileHint);
+      upBox.appendChild(upLocalBox);
+
+      // First sight of the model lists: pick the obvious SeedVR2 files so the
+      // local engine works without a trip to the dropdowns.
+      function upAutoPickModels() {
+        const has = (list, name) => (list || []).includes(name);
+        const find = (list, ...needles) =>
+          (list || []).find(f => needles.every(n => f.toLowerCase().includes(n))) || "";
+        const dm = S._models?.diffusion_models, vs = S._models?.vaes;
+        if (!dm?.length) return;
+        if (!S.up.local.model || !has(dm, S.up.local.model)) S.up.local.model = find(dm, "seedvr");
+        if (!S.up.local.vae || !has(vs, S.up.local.vae)) S.up.local.vae = find(vs, "ema_vae") || find(vs, "seedvr");
+        upModelDD._setValue?.(S.up.local.model || null);
+        upVaeDD._setValue?.(S.up.local.vae || null);
+      }
+      function syncUpEngine() {
+        const local = S.up.engine === "local";
+        engPills.forEach(p => setPillActive(p, S.up.engine === p._key));
+        upCloudBox.style.display = local ? "none" : "flex";
+        upLocalBox.style.display = local ? "flex" : "none";
+        if (local) upAutoPickModels();
+        // Advanced rows and the seed row are engine-dependent. syncAdv is a
+        // const defined further down, so the initial call has to come after it
+        // (see below) — from a click handler it is always live.
+        syncAdv();
+      }
       const syncUpSource = () => {
         const drop = S._upDrop;
         if (drop?.length) {
@@ -1511,14 +1610,28 @@ app.registerExtension({
       // with no UI control, per user preference.)
       advPanel.append(advQ2);
 
-      // Upscale tab section: SeedVR2 noise scale (seed row stays hidden —
-      // the template pins seed -1, i.e. fal picks a random one per call).
+      // Upscale tab, cloud engine: SeedVR2 noise scale (the seed row stays
+      // hidden — the fal template pins seed -1, i.e. fal picks per call).
       const advU = advSec();
-      advU.appendChild(advDivider("Upscale"));
+      advU.appendChild(advDivider("Upscale · cloud"));
       const upNoise = DragNI(S.up.noise, 0, 1, 0.05, v => { S.up.noise = v; persist(); }, "48px");
       upNoise.title = "SeedVR2 noise scale — 0.1 = default; higher invents more detail";
       advU.appendChild(advGrid(["Noise", upNoise]));
       advPanel.appendChild(advU);
+
+      // Upscale tab, local engine: the KSampler that drives SeedVR2. One step
+      // is the model's design point — it restores detail in a single pass.
+      const advUL = advSec();
+      advUL.appendChild(advDivider("Upscale · local"));
+      const ulSteps = NI(S.up.local.steps, 1, 20, 1, v => { S.up.local.steps = Math.max(1, Math.round(v || 1)); persist(); });
+      const ulCfg = NI(S.up.local.cfg, 0, 30, 0.1, v => { S.up.local.cfg = isFinite(v) ? v : 1; persist(); });
+      advUL.appendChild(advGrid(
+        [capI("Steps", "SeedVR2 is a one-step restorer — 1 is the intended value. More steps cost time without adding much."), ulSteps],
+        [capI("CFG", "Keep 1. SeedVR2's conditioning comes from the image itself, not a prompt."), ulCfg]));
+      const ulSamp = DD(() => SAMPLERS, S.up.local.sampler, v => { S.up.local.sampler = v; persist(); });
+      const ulSched = DD(() => SCHEDULERS, S.up.local.scheduler, v => { S.up.local.scheduler = v; persist(); });
+      advUL.appendChild(advGrid(["Sampler", ulSamp], ["Sched", ulSched]));
+      advPanel.appendChild(advUL);
 
       // Edit tab section — Krea2 Edit patch + KSampler + mask processing.
       // Every row carries an ⓘ tip with the source workflows' guidance.
@@ -1555,13 +1668,18 @@ app.registerExtension({
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
         const up = S.tab === "upscale", ed = S.tab === "edit";
+        const upLocal = up && S.up.engine === "local";
         advQ1.style.display = up || ed ? "none" : "flex";
         advQ2.style.display = up || ed ? "none" : "flex";
-        advU.style.display = up ? "flex" : "none";
+        advU.style.display = up && !upLocal ? "flex" : "none";
+        advUL.style.display = upLocal ? "flex" : "none";
         advE.style.display = ed ? "flex" : "none";
-        seedRowEl.style.display = up ? "none" : "grid";
+        // The local engine runs a real KSampler, so its seed is meaningful;
+        // the fal template pins seed -1 and picks its own.
+        seedRowEl.style.display = up && !upLocal ? "none" : "grid";
       };
       syncAdv();
+      syncUpEngine();   // needs syncAdv to exist — hence not at upBox build time
 
       // spacer then Generate pinned to bottom
       left.appendChild(mk("div", { flex: "1", minHeight: "10px" }));
@@ -2259,7 +2377,7 @@ app.registerExtension({
       cmpChip.title = "Before / after slider for this upscaled result";
       const upChip = DarkChip("⤢ Upscale ▾", () => openUpscaleMenu(upChip));
       upChip.style.display = "none";
-      upChip.title = "Upscale this image with SeedVR2 (fal.ai API, paid)";
+      upChip.title = "Upscale this image with SeedVR2 (engine follows the UPSCALE tab)";
       const clearChip = DarkChip("✕ Clear", () => doClearResult());
       clearChip.style.display = "none";
       clearChip.title = "Clear the result from this node (files on disk are untouched)";
@@ -2564,6 +2682,9 @@ app.registerExtension({
             loras: d.loras || [],
             upscale_models: d.upscale_models || [],
           };
+          // The local upscale engine's model/VAE default to whatever SeedVR2
+          // files are on disk — only possible once the lists arrive.
+          upAutoPickModels();
           if (showStatus) setStatus("Model lists refreshed.", C.ok);
         }).catch(() => { if (showStatus) setStatus("Model refresh failed.", C.err); });
       }
@@ -2716,9 +2837,12 @@ app.registerExtension({
           { name: "…_v1_2_r128", url: `${IDE}/krea2_identity_edit_v1_2_r128.safetensors` },
           { name: "…_v1_2_r64", url: `${IDE}/krea2_identity_edit_v1_2_r64.safetensors` },
         ], "Required by the EDIT tab (hardwired at strength 1.0, no UI control). r128/r64 are the smaller low-VRAM ranks — rename to krea2_identity_edit_v1_2.safetensors or edit workflows/edit_workflow.json."),
-        helpRow("Upscale Model", "→ models/SEEDVR2/", [
-          { name: "numz/SeedVR2_comfyUI", url: `${HF}/numz/SeedVR2_comfyUI/tree/main` },
-        ], "Run SeedVR2 on your own GPU instead (RunPod etc.): grab the 3b or 7b weights + ema_vae, install numz/ComfyUI-SeedVR2_VideoUpscaler, and swap the fal node out of workflows/upscale_workflow.json."),
+        helpRow("Upscale Model", "→ models/diffusion_models/", [
+          { name: "seedvr2 (pick a variant)", url: `${HF}/Comfy-Org/SeedVR2/tree/main/diffusion_models` },
+        ], "UPSCALE tab, LOCAL engine — pick the variant that fits your VRAM (3b is the safe default). The CLOUD engine calls fal.ai instead and downloads nothing."),
+        helpRow("Upscale VAE", "→ models/vae/", [
+          { name: "ema_vae_fp16", url: `${HF}/Comfy-Org/SeedVR2/resolve/main/vae/ema_vae_fp16.safetensors` },
+        ], "SeedVR2's own VAE — not the Krea 2 one."),
       );
       helpOverlay.appendChild(modelsList);
 
@@ -2765,7 +2889,7 @@ app.registerExtension({
         { name: "🤗 Comfy-Org/Krea-2", url: `${HF}/Comfy-Org/Krea-2` },
         { name: "📖 ComfyUI Krea 2 guide", url: "https://docs.comfy.org/tutorials/image/krea/krea-2" },
         { name: "🤗 Identity Edit LoRA", url: `${HF}/conradlocke/krea2-identity-edit` },
-        { name: "⚙ SeedVR2 (local upscale)", url: "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler" },
+        { name: "🤗 SeedVR2 (local upscale)", url: `${HF}/Comfy-Org/SeedVR2` },
       ].forEach(({ name, url }) => {
         const a = mk("a", {
           fontSize: "10px", color: C.muted, background: C.bg2,
@@ -2951,11 +3075,14 @@ app.registerExtension({
       function openUpscaleMenu(anchor) {
         const img = S.lastImage;
         if (!img?.filename) return;
-        ctxMenu.replaceChildren(
-          ctxItem("⤢", "Upscale → 1080p", () => doViewerUpscale(img, { resolution: "1080p" })),
-          ctxItem("⤢", "Upscale → 1440p", () => doViewerUpscale(img, { resolution: "1440p" })),
-          ctxItem("⤢", "Upscale → 2160p", () => doViewerUpscale(img, { resolution: "2160p" })),
-        );
+        // Entries follow the UPSCALE tab's engine: target resolutions on the
+        // cloud path, scale factors on the local one.
+        ctxMenu.replaceChildren(...(S.up.engine === "local"
+          ? [2, 4, 6, 8].map(f =>
+              ctxItem("⤢", `Upscale ${f}× (local)`, () => doViewerUpscale(img, { engine: "local", factor: f })))
+          : ["1080p", "1440p", "2160p"].map(res =>
+              ctxItem("⤢", `Upscale → ${res}`, () => doViewerUpscale(img, { engine: "cloud", resolution: res })))
+        ));
         const r = anchor.getBoundingClientRect();
         ctxMenu.style.left = Math.min(r.left, window.innerWidth - 200) + "px";
         ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 118) + "px";
@@ -3411,34 +3538,79 @@ app.registerExtension({
       };
       // Current pill selection as a job-scale descriptor (snapshotted per job
       // so a mid-run pill change can't retarget queued work).
-      const upScaleSel = () => ({ resolution: S.up.resolution });
+      const upScaleSel = () => (S.up.engine === "local"
+        ? { engine: "local", factor: S.up.local.factor }
+        : { engine: "cloud", resolution: S.up.resolution });
+      // auto-save off → PreviewImage (temp). Folder-batch jobs force SaveImage
+      // (unattended results must land on disk for the copy-back); viewer
+      // upscales respect auto-save.
+      const upSaveNode = (p, id, force) => {
+        if (S.autoSave || force) return;
+        p[id] = {
+          inputs: { images: p[id].inputs.images },
+          class_type: "PreviewImage",
+          _meta: { title: "Preview (unsaved)" },
+        };
+      };
       function buildUpscalePrompt(tpl, o) {
         const p = JSON.parse(JSON.stringify(tpl));
         p["K2U:load"].inputs.image = o.imageName;
         const u = p["K2U:up"].inputs;   // template pins upscale_mode "target"
         u.target_resolution = o.scale.resolution;
         u.noise_scale = S.up.noise;
-        // Folder-batch jobs force SaveImage (unattended results must land on
-        // disk for the copy-back); viewer upscales respect auto-save.
-        if (!S.autoSave && !o.forceSave) {
-          p["K2U:save"] = {
-            inputs: { images: p["K2U:save"].inputs.images },
-            class_type: "PreviewImage",
-            _meta: { title: "Preview (unsaved)" },
-          };
+        upSaveNode(p, "K2U:save", o.forceSave);
+        return p;
+      }
+      // Local SeedVR2: the scale factor drives ResizeImageMaskNode and the
+      // model restores detail at the new size. Tile size is the VRAM dial;
+      // overlap follows tile/4, matching ComfyUI's own clamp.
+      function buildUpscaleLocalPrompt(tpl, o) {
+        const p = JSON.parse(JSON.stringify(tpl));
+        p["K2UL:img"].inputs.image = o.imageName;
+        p["K2UL:unet"].inputs.unet_name = S.up.local.model;
+        p["K2UL:vae"].inputs.vae_name = S.up.local.vae;
+        p["K2UL:resize"].inputs["resize_type.multiplier"] =
+          Math.max(1, Math.min(8, o.scale.factor || 2));
+        const t = S.up.local.tile;
+        for (const id of ["K2UL:enc", "K2UL:dec"]) {
+          p[id].inputs.tile_size = t;
+          p[id].inputs.overlap = t / 4;
         }
+        const k = p["K2UL:sampler"].inputs;
+        k.seed = o.seed != null ? o.seed : Math.floor(Math.random() * 1e15);
+        k.steps = S.up.local.steps;
+        k.cfg = S.up.local.cfg;
+        k.sampler_name = S.up.local.sampler;
+        k.scheduler = S.up.local.scheduler;
+        upSaveNode(p, "K2UL:save", o.forceSave);
         return p;
       }
       // Queue upscale jobs onto the shared rolling run. Callers own the
       // S._submitting guard. jobs: [{imageName, scale, before, copyTo?, forceSave?}]
       async function submitUpscaleJobs(jobs) {
+        // The local engine loads its own weights — without them the graph fails
+        // validation server-side, so say it here instead.
+        if (jobs.some(j => j.scale?.engine === "local") && !(S.up.local.model && S.up.local.vae)) {
+          setStatus("Pick a SeedVR2 model and VAE for the local engine (see ✦ Help for downloads).", C.err);
+          return;
+        }
         try {
-          const tpl = await getTemplate("upscale");
+          // Each job carries its own engine (snapshotted at click time), so a
+          // mid-run engine switch can't retarget queued work. Both templates
+          // are fetched only if the batch actually mixes engines.
+          const tpls = {};
+          for (const j of jobs) {
+            const eng = j.scale?.engine === "local" ? "upscale_local" : "upscale";
+            if (!tpls[eng]) tpls[eng] = await getTemplate(eng);
+          }
           const first = startBatchRun();
           const br = S._batchRun;
           let failed = null;
           for (const j of jobs) {
-            const prompt = buildUpscalePrompt(tpl, j);
+            const local = j.scale?.engine === "local";
+            const prompt = local
+              ? buildUpscaleLocalPrompt(tpls.upscale_local, j)
+              : buildUpscalePrompt(tpls.upscale, j);
             const resp = await api.fetchApi("/prompt", {
               method: "POST", headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ prompt, client_id: api.clientId }),

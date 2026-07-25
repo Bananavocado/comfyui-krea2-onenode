@@ -39,14 +39,14 @@ direct download links, and marks which packs are already installed.
 |---|---|
 | [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | all tabs (Power Lora Loader, Seed) |
 | [comfyui-krea2edit](https://github.com/lbouaraba/comfyui-krea2edit) | EDIT |
-| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | T2I HQ (ClownsharKSampler_Beta) |
-| [ComfyUI-Krea2T-Enhancer](https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer) | T2I HQ |
-| [ComfyUI_LayerStyle](https://github.com/chflame163/ComfyUI_LayerStyle) | T2I HQ (grain) |
-| [was-node-suite-comfyui](https://github.com/WASasquatch/was-node-suite-comfyui) | T2I HQ (Lucy Sharpen) |
-| [ComfyUI-fal-API](https://github.com/gokayfem/ComfyUI-fal-API) | UPSCALE (paid fal.ai key) |
+| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | T2I, SCENE (ClownsharKSampler_Beta) |
+| [ComfyUI-Krea2T-Enhancer](https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer) | T2I, SCENE |
+| [ComfyUI_LayerStyle](https://github.com/chflame163/ComfyUI_LayerStyle) | T2I, SCENE (grain) |
+| [was-node-suite-comfyui](https://github.com/WASasquatch/was-node-suite-comfyui) | T2I, SCENE (Lucy Sharpen) |
+| [ComfyUI-fal-API](https://github.com/gokayfem/ComfyUI-fal-API) | UPSCALE, cloud engine only (paid fal.ai key) |
 
-Everything else the templates use is ComfyUI core. T2I and SCENE only need
-rgthree-comfy.
+Everything else the templates use is ComfyUI core — including the whole local
+SeedVR2 upscale chain, so that path needs no extra pack at all.
 
 ## Models (fixed in the templates)
 
@@ -56,6 +56,8 @@ rgthree-comfy.
 | Text encoder | `qwen3vl_4b_fp8_scaled.safetensors` (type `krea2`) | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2/tree/main/text_encoders) |
 | VAE | `qwen_image_vae.safetensors` | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2/tree/main/vae) |
 | Identity Edit LoRA (EDIT tab) | `krea2_identity_edit_v1_2.safetensors` | [conradlocke/krea2-identity-edit](https://huggingface.co/conradlocke/krea2-identity-edit) |
+| SeedVR2 model (UPSCALE, local) | `seedvr2_*.safetensors` → `models/diffusion_models/` | [Comfy-Org/SeedVR2](https://huggingface.co/Comfy-Org/SeedVR2/tree/main/diffusion_models) |
+| SeedVR2 VAE (UPSCALE, local) | `ema_vae_fp16.safetensors` → `models/vae/` | [Comfy-Org/SeedVR2](https://huggingface.co/Comfy-Org/SeedVR2/tree/main/vae) |
 
 To change them, edit `workflows/*.json` (or pick a different model in Settings).
 
@@ -77,6 +79,17 @@ To change them, edit `workflows/*.json` (or pick a different model in Settings).
 Tabs: **T2I**, **SCENE** (queue several prompts in one run), **EDIT**
 (instruction editing, mask or reference), **UPSCALE** (SeedVR2). UI state
 persists in browser localStorage.
+
+UPSCALE runs SeedVR2 two ways, picked with the ENGINE pills:
+
+- **🖥 Local** — SeedVR2 on your own GPU through ComfyUI's core nodes. Free,
+  no extra node pack; needs the SeedVR2 model + `ema_vae_fp16` on disk. Scale
+  2×/4×/6×/8×, with a VAE tile size to trade speed for VRAM.
+- **☁ Cloud** — the same model on fal.ai. Nothing to download, but each image
+  is a paid API call and needs a `FAL_KEY` (env var or the fal-api pack's
+  `config.ini`). Targets 1080p / 1440p / 2160p.
+
+Both share the drop zone, folder batching and copy-back.
 
 ## Apple Silicon (MPS) compatibility
 
