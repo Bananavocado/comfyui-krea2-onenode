@@ -14,13 +14,24 @@ execution are all ComfyUI core.
 ## Install
 
 ```bash
-ln -s /path/to/comfyui-krea2-onenode <ComfyUI>/custom_nodes/comfyui-krea2-onenode
+git clone https://github.com/Bananavocado/comfyui-krea2-onenode <ComfyUI>/custom_nodes/comfyui-krea2-onenode
 ```
+
+Then pull in the node packs it depends on — one command, listed below:
+
+```bash
+<ComfyUI>/custom_nodes/comfyui-krea2-onenode/install_deps.sh
+```
+
+macOS: double-click **Install Dependencies.command** instead. The script finds
+`custom_nodes` from its own location, clones or fast-forwards each pack, and
+installs their requirements with your ComfyUI python (override with
+`PYTHON=/path/to/python`, or pass the `custom_nodes` path as an argument).
 
 Restart ComfyUI. The node appears as **One Node · Krea 2** (category "One Node").
 
 The **✦ Help** button in the node lists every model and node pack below with
-direct download links.
+direct download links, and marks which packs are already installed.
 
 ### Required custom node packs
 
