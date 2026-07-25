@@ -48,6 +48,19 @@ To change them, edit `workflows/generate_workflow.json`.
 UI state persists in browser localStorage. The greyed mode pills
 (I2I, EDIT, …) are placeholders for later phases.
 
+## Apple Silicon (MPS) compatibility
+
+`mps_compat.py` is loaded from `__init__.py` before anything else. MPS has no
+float64 support, and several node packs (RES4LYF, ComfyUI core, others) do
+unguarded float64 math — so this patches the single chokepoint,
+`torch.Tensor.to()`, and silently downcasts float64→float32 *only* when the
+target device is MPS. Every other `.to()` call is untouched.
+
+It is a no-op on CUDA/CPU machines (RunPod, Linux servers), so the pack ships
+the same everywhere. Disable with `KREA2_NO_MPS_GUARD=1`. The patch is
+idempotent — safe if the old standalone `mps-float64-guard` pack is still
+installed alongside, though that folder can now be deleted.
+
 ## Notes
 
 - Pass-1 negative conditioning is zeroed (`ConditioningZeroOut`), standard
