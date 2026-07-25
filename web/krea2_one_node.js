@@ -867,7 +867,7 @@ app.registerExtension({
       galleryBtn.append(tx(mk("span", { fontSize: "12px" }), "▦"), tx(mk("span"), "Gallery"));
       toolbar.appendChild(noDrag(galleryBtn));
 
-      const helpBtn = TBtn("✦ Help", () => { helpOverlay.style.display = "flex"; });
+      const helpBtn = TBtn("✦ Help", () => { helpOverlay.style.display = "flex"; checkPacks(); });
       helpBtn.title = "Help — where to get the models and node packs";
       toolbar.appendChild(helpBtn);
 
@@ -2664,8 +2664,28 @@ app.registerExtension({
         });
         return tx(t, title);
       }
+      // Node packs get an installed/missing dot, probed lazily the first time
+      // Help opens: /object_info/<class> answers 200 with {} when the class
+      // isn't registered, so one tiny request per pack is enough.
+      const packProbes = [];
+      let packsChecked = false;
+      function checkPacks() {
+        if (packsChecked) return;
+        packsChecked = true;
+        packProbes.forEach(({ el, cls }) => {
+          api.fetchApi(`/object_info/${encodeURIComponent(cls)}`)
+            .then(r => r.json())
+            .then(d => {
+              const have = !!d && Object.keys(d).length > 0;
+              tx(el, have ? "✓ installed" : "● missing");
+              el.style.color = have ? C.ok : C.warn;
+            })
+            .catch(() => { tx(el, ""); });
+        });
+      }
+
       // label · chips · right-hand destination (folder path or "needed by" hint)
-      function helpRow(label, dest, links, note, icon) {
+      function helpRow(label, dest, links, note, icon, probe) {
         const wrap = mk("div", { marginBottom: "7px" });
         const row = mk("div", { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" });
         const lbl = mk("span", {
@@ -2683,7 +2703,14 @@ app.registerExtension({
           whiteSpace: "nowrap", fontWeight: "600",
         });
         tx(d, dest);
-        row.append(lbl, cw, d);
+        if (probe) {
+          const st = mk("span", { fontSize: "9px", fontWeight: "700", color: C.muted, whiteSpace: "nowrap", flexShrink: "0" });
+          tx(st, "checking…");
+          packProbes.push({ el: st, cls: probe });
+          row.append(lbl, cw, st, d);
+        } else {
+          row.append(lbl, cw, d);
+        }
         wrap.appendChild(row);
         if (note) wrap.appendChild(tx(mk("div", {
           fontSize: "8px", color: C.muted, fontStyle: "italic",
@@ -2721,9 +2748,12 @@ app.registerExtension({
           { name: "…_v1_2_r128", url: `${IDE}/krea2_identity_edit_v1_2_r128.safetensors` },
           { name: "…_v1_2_r64", url: `${IDE}/krea2_identity_edit_v1_2_r64.safetensors` },
         ], "Required by the EDIT tab (hardwired at strength 1.0, no UI control). r128/r64 are the smaller low-VRAM ranks — rename to krea2_identity_edit_v1_2.safetensors or edit workflows/edit_workflow.json."),
-        helpRow("Upscale Model", "→ none (cloud)", [
+        helpRow("Upscale (cloud)", "→ none (API)", [
           { name: "fal.ai · SeedVR2 upscale", url: "https://fal.ai/models/fal-ai/seedvr/upscale/image" },
-        ], "The UPSCALE tab calls fal.ai — nothing to download, but it is a PAID API call per image and needs a FAL_KEY in the fal-api node pack's config.ini."),
+        ], "What the UPSCALE tab calls today — nothing to download, but it is a PAID API call per image and needs a FAL_KEY in the fal-api node pack's config.ini."),
+        helpRow("Upscale (local)", "→ models/SEEDVR2/", [
+          { name: "numz/SeedVR2_comfyUI", url: `${HF}/numz/SeedVR2_comfyUI/tree/main` },
+        ], "Run SeedVR2 on your own GPU instead (RunPod etc.): grab the 3b or 7b weights + ema_vae, install numz/ComfyUI-SeedVR2_VideoUpscaler, and swap the fal node out of workflows/upscale_workflow.json."),
       );
       helpOverlay.appendChild(modelsList);
 
@@ -2732,29 +2762,32 @@ app.registerExtension({
       packsList.append(
         helpRow("rgthree-comfy", "→ all tabs", [
           { name: "rgthree/rgthree-comfy", url: "https://github.com/rgthree/rgthree-comfy" },
-        ], "Power Lora Loader + Seed. Required by every template.", ICON_EXT),
+        ], "Power Lora Loader + Seed. Required by every template.", ICON_EXT, "Power Lora Loader (rgthree)"),
         helpRow("comfyui-krea2edit", "→ EDIT", [
           { name: "lbouaraba/comfyui-krea2edit", url: "https://github.com/lbouaraba/comfyui-krea2edit" },
-        ], "Krea2EditModelPatch + Krea2EditGroundedEncode.", ICON_EXT),
+        ], "Krea2EditModelPatch + Krea2EditGroundedEncode.", ICON_EXT, "Krea2EditModelPatch"),
         helpRow("RES4LYF", "→ T2I HQ", [
           { name: "ClownsharkBatwing/RES4LYF", url: "https://github.com/ClownsharkBatwing/RES4LYF" },
-        ], "ClownsharKSampler_Beta — both HQ passes.", ICON_EXT),
+        ], "ClownsharKSampler_Beta — both HQ passes.", ICON_EXT, "ClownsharKSampler_Beta"),
         helpRow("Krea2T-Enhancer", "→ T2I HQ", [
           { name: "capitan01R/ComfyUI-Krea2T-Enhancer", url: "https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer" },
-        ], "Model patch in the HQ chain (enabled, strength 1.5).", ICON_EXT),
+        ], "Model patch in the HQ chain (enabled, strength 1.5).", ICON_EXT, "ComfyUI-Krea2T-Enhancer"),
         helpRow("ComfyUI_LayerStyle", "→ T2I HQ", [
           { name: "chflame163/ComfyUI_LayerStyle", url: "https://github.com/chflame163/ComfyUI_LayerStyle" },
-        ], "LayerFilter: AddGrain — the HQ Grain post step.", ICON_EXT),
+        ], "LayerFilter: AddGrain — the HQ Grain post step.", ICON_EXT, "LayerFilter: AddGrain"),
         helpRow("WAS Node Suite", "→ T2I HQ", [
           { name: "WASasquatch/was-node-suite-comfyui", url: "https://github.com/WASasquatch/was-node-suite-comfyui" },
-        ], "Image Lucy Sharpen — the HQ Sharpen post step.", ICON_EXT),
+        ], "Image Lucy Sharpen — the HQ Sharpen post step.", ICON_EXT, "Image Lucy Sharpen"),
         helpRow("ComfyUI-fal-API", "→ UPSCALE", [
           { name: "gokayfem/ComfyUI-fal-API", url: "https://github.com/gokayfem/ComfyUI-fal-API" },
-        ], "SeedVR2 upscale node. Needs a fal.ai API key — paid per call.", ICON_EXT),
+        ], "SeedVR2 upscale node. Needs a fal.ai API key — paid per call.", ICON_EXT,
+          "FalAPI_fal-ai-seedvr-upscale-image"),
       );
       helpOverlay.appendChild(packsList);
       const packsNote = mk("div", { fontSize: "9px", color: C.muted, lineHeight: "1.6", marginTop: "2px" });
-      packsNote.innerHTML = "T2I and SCENE only need <b>rgthree-comfy</b> — the rest are per-tab. "
+      packsNote.innerHTML = "Install everything missing in one go: run <b>install_deps.sh</b> in this node's folder "
+        + "(macOS: double-click <b>Install Dependencies.command</b>), then restart ComfyUI. "
+        + "T2I and SCENE only need <b>rgthree-comfy</b> — the rest are per-tab. "
         + "Everything else the templates use (KSampler, LoadImage, ResizeImageMaskNode, SaveImage…) is ComfyUI core. "
         + "Apple Silicon: the float64→float32 MPS guard ships inside this node pack, nothing extra to install.";
       helpOverlay.appendChild(packsNote);
@@ -2766,6 +2799,7 @@ app.registerExtension({
         { name: "🤗 Comfy-Org/Krea-2", url: `${HF}/Comfy-Org/Krea-2` },
         { name: "📖 ComfyUI Krea 2 guide", url: "https://docs.comfy.org/tutorials/image/krea/krea-2" },
         { name: "🤗 Identity Edit LoRA", url: `${HF}/conradlocke/krea2-identity-edit` },
+        { name: "⚙ SeedVR2 (local upscale)", url: "https://github.com/numz/ComfyUI-SeedVR2_VideoUpscaler" },
       ].forEach(({ name, url }) => {
         const a = mk("a", {
           fontSize: "10px", color: C.muted, background: C.bg2,
