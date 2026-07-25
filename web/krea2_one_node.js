@@ -67,6 +67,8 @@ function defaultState() {
     modelUnet: "krea2_turbo_bf16.safetensors",
     modelClip: "qwen3vl_4b_fp8_scaled.safetensors",
     modelVae: "qwen_image_vae.safetensors",
+    // EDIT tab: always loaded at strength 1.0, only the file is pickable.
+    modelIdLora: "krea2_identity_edit_v1_2.safetensors",
     // T2I (quality template): ClownsharK two-pass, same-res refine, no upscale.
     q: {
       p1Steps: 8, p1Cfg: 1.0, p1Sampler: "linear/euler", p1Sched: "simple",
@@ -2517,7 +2519,13 @@ app.registerExtension({
         () => S.modelClip, (v) => S.modelClip = v);
       const vaeCol = modelCol("VAE", "/models/vae", "vaes",
         () => S.modelVae, (v) => S.modelVae = v);
-      modelsRow.append(unetCol, clipCol, vaeCol);
+      // The EDIT tab always loads this one at strength 1.0 on top of the base
+      // model — it lives here so it's obvious which file to download and where.
+      const idLoraCol = modelCol("Identity edit LoRA", "/models/loras", "loras",
+        () => S.modelIdLora, (v) => S.modelIdLora = v);
+      idLoraCol.appendChild(tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "5px", lineHeight: "1.5" }),
+        "EDIT tab · always on at strength 1.0"));
+      modelsRow.append(unetCol, clipCol, vaeCol, idLoraCol);
       settingsOverlay.appendChild(modelsRow);
 
       // preferences
@@ -3499,7 +3507,9 @@ app.registerExtension({
         p["K2E:unet"].inputs.unet_name = S.modelUnet;
         p["K2E:clip"].inputs.clip_name = S.modelClip;
         p["K2E:vae"].inputs.vae_name = S.modelVae;
-        // K2E:idlora (identity-edit LoRA) stays hardwired; user rows stack on top.
+        // The identity-edit LoRA is always in the chain at strength 1.0 — only
+        // which file it points at is settable (Settings); user rows stack on top.
+        p["K2E:idlora"].inputs.lora_name = S.modelIdLora;
         let li = 1;
         for (const row of S.loras) {
           if (!row.name) continue;

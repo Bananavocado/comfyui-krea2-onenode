@@ -97,3 +97,9 @@ installed alongside, though that folder can now be deleted.
   for turbo/distilled models at cfg 1.
 - The node's `image` output replays the last generated image to downstream
   nodes when the graph is run with ComfyUI's own Run button.
+
+## License
+
+[Apache License 2.0](LICENSE) — free to use, modify and redistribute,
+commercially included, as long as you keep the license and notices.
+The models, LoRAs and node packs it loads carry their own licenses.
