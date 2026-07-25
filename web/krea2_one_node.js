@@ -1236,9 +1236,11 @@ app.registerExtension({
         maskClr.style.display = S._editMask ? "" : "none";
         const d = editDims();
         tx(editDimsTxt, d ? `output ${d.w}×${d.h}` : "output — pick a source image");
+        syncGenEnabled();
       }
+      // NOTE: no syncEditUI() here — genBtn doesn't exist yet (TDZ) and the
+      // build-ending syncTab() covers the initial sync.
       left.appendChild(editBox);
-      syncEditUI();
 
       // SIZE — named preset dropdown + orientation toggle; W/H boxes only for
       // Custom. Presets store landscape base dims; "port" swaps them.
@@ -1856,6 +1858,15 @@ app.registerExtension({
         if (ed) syncEditUI();
         syncAdv();
         syncSize();
+        syncGenEnabled();
+      }
+      // Edit needs a source image AND an instruction — grey the button until
+      // both exist (other tabs keep their own click-time validation).
+      function syncGenEnabled() {
+        const off = S.tab === "edit" && (!S._editSrc || !S.prompt.trim());
+        genBtn.disabled = off;
+        genBtn.style.opacity = off ? ".45" : "1";
+        genBtn.style.cursor = off ? "default" : "pointer";
       }
       function setTab(t) {
         if (S.tab === t) return;
@@ -2414,7 +2425,7 @@ app.registerExtension({
       };
       promptTA.onfocus = () => promptTA.style.borderColor = LIME;
       promptTA.onblur = () => promptTA.style.borderColor = C.border;
-      promptTA.oninput = () => { S.prompt = promptTA.value; persist(); taGrow(); };
+      promptTA.oninput = () => { S.prompt = promptTA.value; persist(); taGrow(); syncGenEnabled(); };
       promptTA.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); promptTA.blur(); } });
       scrollGuard(promptTA);
       noDrag(promptTA);
