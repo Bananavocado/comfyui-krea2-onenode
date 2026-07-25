@@ -1060,6 +1060,16 @@ app.registerExtension({
         scalePills.forEach(p => setPillActive(p, S.up.local.factor === p._fac));
       }
       upCloudBox.appendChild(upFacRow);
+      // Where the key goes — the fal nodes read it from their own pack, so
+      // there is nothing to set inside this node.
+      const upCloudHint = mk("div", { fontSize: "9px", color: C.muted, marginTop: "6px", lineHeight: "1.55" });
+      upCloudHint.innerHTML = "Paid fal.ai API call per image — needs a key. Put "
+        + "<b style=\"color:#8a8a8a\">FAL_KEY = your_key</b> in "
+        + "<b style=\"color:#8a8a8a\">custom_nodes/fal-api/config.ini</b>, or set a "
+        + "<b style=\"color:#8a8a8a\">FAL_KEY</b> environment variable (better on a cloud box — "
+        + "it stays out of the image). Get one at fal.ai/dashboard/keys. "
+        + "Restart ComfyUI after adding it.";
+      upCloudBox.appendChild(upCloudHint);
       upBox.appendChild(upCloudBox);
 
       // Local: scale factor drives ResizeImageMaskNode, SeedVR2 restores the
