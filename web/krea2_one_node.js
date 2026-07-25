@@ -867,8 +867,8 @@ app.registerExtension({
       galleryBtn.append(tx(mk("span", { fontSize: "12px" }), "▦"), tx(mk("span"), "Gallery"));
       toolbar.appendChild(noDrag(galleryBtn));
 
-      const helpBtn = TBtn("✦ Help", null, true);
-      helpBtn.title = "Help — coming in a later phase";
+      const helpBtn = TBtn("✦ Help", () => { helpOverlay.style.display = "flex"; });
+      helpBtn.title = "Help — where to get the models and node packs";
       toolbar.appendChild(helpBtn);
 
       const settingsBtn = TBtn("⚙ Settings", () => { settingsOverlay.style.display = "flex"; });
@@ -2600,6 +2600,189 @@ app.registerExtension({
         }).catch(() => { if (showStatus) setStatus("Model refresh failed.", C.err); });
       }
       loadModels(false);
+
+      // ── HELP overlay (where to get models + required node packs) ───────────
+      // Same shape as the reference node's Help: rows of download chips with the
+      // destination folder on the right. Everything listed here is what the four
+      // workflow templates actually reference — keep it in sync when a template
+      // gains or drops a node/model.
+      const helpOverlay = mk("div", {
+        position: "absolute", inset: "0", zIndex: "300", display: "none",
+        flexDirection: "column", background: C.bg0, borderRadius: "10px",
+        padding: "16px 20px", boxSizing: "border-box", gap: "8px",
+        overflowY: "auto",
+      });
+      noDrag(helpOverlay);
+      helpOverlay.addEventListener("wheel", (e) => e.stopPropagation(), { passive: true });
+      root.appendChild(helpOverlay);
+
+      const helpHdr = mk("div", { display: "flex", alignItems: "center", gap: "8px", flexShrink: "0" });
+      const helpTitle = mk("div", {
+        fontSize: "15px", fontWeight: "700", letterSpacing: ".12em",
+        textTransform: "uppercase", color: "#fff", flex: "1",
+      });
+      tx(helpTitle, "✦ Help");
+      const helpClose = mk("button", {
+        background: "transparent", border: `1.5px solid rgba(255,103,103,.55)`,
+        borderRadius: "6px", padding: "4px 11px", cursor: "pointer",
+        color: C.err, fontSize: "11px", fontWeight: "700", outline: "none",
+        transition: "all .15s",
+      });
+      tx(helpClose, "× Close");
+      helpClose.onmouseenter = () => { helpClose.style.background = "rgba(255,103,103,.1)"; };
+      helpClose.onmouseleave = () => { helpClose.style.background = "transparent"; };
+      helpClose.onclick = (e) => { e.stopPropagation(); helpOverlay.style.display = "none"; };
+      helpHdr.append(helpTitle, noDrag(helpClose));
+      helpOverlay.appendChild(helpHdr);
+
+      const ICON_DL = "M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z";
+      const ICON_EXT = "M14 3v2h3.6l-9.8 9.8 1.4 1.4L19 6.4V10h2V3h-7zM5 5h5V3H3v18h18v-7h-2v5H5V5z";
+      function helpLink(name, url, iconPath = ICON_DL) {
+        const a = mk("a", {
+          fontSize: "10px", color: C.text, background: C.bg3,
+          border: `1px solid ${C.border}`, borderRadius: "5px", padding: "3px 9px",
+          textDecoration: "none", display: "inline-flex", alignItems: "center",
+          gap: "4px", transition: "border-color .15s, color .15s", flexShrink: "0",
+        }, { href: url, target: "_blank", rel: "noopener" });
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 24 24");
+        svg.setAttribute("width", "9"); svg.setAttribute("height", "9");
+        svg.style.fill = "currentColor"; svg.style.flexShrink = "0";
+        const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        p.setAttribute("d", iconPath);
+        svg.appendChild(p);
+        a.append(svg, tx(mk("span"), name));
+        a.onmouseenter = () => { a.style.borderColor = LIME; a.style.color = LIME; };
+        a.onmouseleave = () => { a.style.borderColor = C.border; a.style.color = C.text; };
+        return noDrag(a);
+      }
+      function helpSection(title) {
+        const t = mk("div", {
+          fontSize: "11px", fontWeight: "700", color: C.text, letterSpacing: ".02em",
+          marginTop: "10px", marginBottom: "8px", paddingTop: "10px",
+          borderTop: `1px solid ${C.border}`,
+        });
+        return tx(t, title);
+      }
+      // label · chips · right-hand destination (folder path or "needed by" hint)
+      function helpRow(label, dest, links, note, icon) {
+        const wrap = mk("div", { marginBottom: "7px" });
+        const row = mk("div", { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" });
+        const lbl = mk("span", {
+          fontSize: "9px", fontWeight: "700", color: LIME, letterSpacing: ".06em",
+          textTransform: "uppercase", minWidth: "128px", flexShrink: "0",
+        });
+        tx(lbl, label);
+        const cw = mk("div", { display: "flex", gap: "4px", flexWrap: "wrap", flex: "1", alignItems: "center" });
+        links.forEach((l, i) => {
+          if (i > 0) cw.appendChild(tx(mk("span", { fontSize: "8px", color: C.muted, alignSelf: "center", flexShrink: "0" }), "or"));
+          cw.appendChild(helpLink(l.name, l.url, icon));
+        });
+        const d = mk("div", {
+          fontSize: "9px", color: "#888", fontFamily: "monospace",
+          whiteSpace: "nowrap", fontWeight: "600",
+        });
+        tx(d, dest);
+        row.append(lbl, cw, d);
+        wrap.appendChild(row);
+        if (note) wrap.appendChild(tx(mk("div", {
+          fontSize: "8px", color: C.muted, fontStyle: "italic",
+          marginTop: "2px", paddingLeft: "134px",
+        }), note));
+        return wrap;
+      }
+
+      const HF = "https://huggingface.co";
+      const K2 = `${HF}/Comfy-Org/Krea-2/resolve/main`;
+      const IDE = `${HF}/conradlocke/krea2-identity-edit/resolve/main`;
+
+      const modelsTitle = helpSection("Where to Get Models");
+      modelsTitle.style.borderTop = "none";
+      modelsTitle.style.paddingTop = "0";
+      modelsTitle.style.marginTop = "4px";
+      helpOverlay.append(modelsTitle);
+
+      const modelsList = mk("div", { display: "flex", flexDirection: "column", gap: "2px" });
+      modelsList.append(
+        helpRow("Diffusion Model", "→ models/diffusion_models/", [
+          { name: "krea2_turbo_bf16", url: `${K2}/diffusion_models/krea2_turbo_bf16.safetensors` },
+          { name: "krea2_turbo_fp8_scaled", url: `${K2}/diffusion_models/krea2_turbo_fp8_scaled.safetensors` },
+          { name: "krea2_turbo_int8_convrot", url: `${K2}/diffusion_models/krea2_turbo_int8_convrot.safetensors` },
+        ], "Turbo variants only — every template is tuned for the 8-step turbo model. bf16 is the template default; fp8/int8 for less VRAM."),
+        helpRow("Text Encoder", "→ models/text_encoders/", [
+          { name: "qwen3vl_4b_fp8_scaled", url: `${K2}/text_encoders/qwen3vl_4b_fp8_scaled.safetensors` },
+          { name: "qwen3vl_4b_bf16", url: `${K2}/text_encoders/qwen3vl_4b_bf16.safetensors` },
+        ], "Loaded with CLIPLoader type \"krea2\"."),
+        helpRow("VAE", "→ models/vae/", [
+          { name: "qwen_image_vae", url: `${K2}/vae/qwen_image_vae.safetensors` },
+        ]),
+        helpRow("Identity Edit LoRA", "→ models/loras/", [
+          { name: "krea2_identity_edit_v1_2", url: `${IDE}/krea2_identity_edit_v1_2.safetensors` },
+          { name: "…_v1_2_r128", url: `${IDE}/krea2_identity_edit_v1_2_r128.safetensors` },
+          { name: "…_v1_2_r64", url: `${IDE}/krea2_identity_edit_v1_2_r64.safetensors` },
+        ], "Required by the EDIT tab (hardwired at strength 1.0, no UI control). r128/r64 are the smaller low-VRAM ranks — rename to krea2_identity_edit_v1_2.safetensors or edit workflows/edit_workflow.json."),
+        helpRow("Style LoRAs (optional)", "→ models/loras/", [
+          { name: "Comfy-Org Krea 2 LoRAs", url: `${HF}/Comfy-Org/Krea-2/tree/main/loras`, },
+          { name: "Civitai · Krea 2", url: "https://civitai.com/models?baseModel=Krea%202" },
+        ], "Anything you drop in models/loras/ shows up in the LORAS rows."),
+        helpRow("Upscale Model", "→ none (cloud)", [
+          { name: "fal.ai · SeedVR2 upscale", url: "https://fal.ai/models/fal-ai/seedvr/upscale/image" },
+        ], "The UPSCALE tab calls fal.ai — nothing to download, but it is a PAID API call per image and needs a FAL_KEY in the fal-api node pack's config.ini."),
+      );
+      helpOverlay.appendChild(modelsList);
+
+      helpOverlay.appendChild(helpSection("Required Custom Node Packs"));
+      const packsList = mk("div", { display: "flex", flexDirection: "column", gap: "2px" });
+      packsList.append(
+        helpRow("rgthree-comfy", "→ all tabs", [
+          { name: "rgthree/rgthree-comfy", url: "https://github.com/rgthree/rgthree-comfy" },
+        ], "Power Lora Loader + Seed. Required by every template.", ICON_EXT),
+        helpRow("comfyui-krea2edit", "→ EDIT", [
+          { name: "lbouaraba/comfyui-krea2edit", url: "https://github.com/lbouaraba/comfyui-krea2edit" },
+        ], "Krea2EditModelPatch + Krea2EditGroundedEncode.", ICON_EXT),
+        helpRow("RES4LYF", "→ T2I HQ", [
+          { name: "ClownsharkBatwing/RES4LYF", url: "https://github.com/ClownsharkBatwing/RES4LYF" },
+        ], "ClownsharKSampler_Beta — both HQ passes.", ICON_EXT),
+        helpRow("Krea2T-Enhancer", "→ T2I HQ", [
+          { name: "capitan01R/ComfyUI-Krea2T-Enhancer", url: "https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer" },
+        ], "Model patch in the HQ chain (enabled, strength 1.5).", ICON_EXT),
+        helpRow("ComfyUI_LayerStyle", "→ T2I HQ", [
+          { name: "chflame163/ComfyUI_LayerStyle", url: "https://github.com/chflame163/ComfyUI_LayerStyle" },
+        ], "LayerFilter: AddGrain — the HQ Grain post step.", ICON_EXT),
+        helpRow("WAS Node Suite", "→ T2I HQ", [
+          { name: "WASasquatch/was-node-suite-comfyui", url: "https://github.com/WASasquatch/was-node-suite-comfyui" },
+        ], "Image Lucy Sharpen — the HQ Sharpen post step.", ICON_EXT),
+        helpRow("ComfyUI-fal-API", "→ UPSCALE", [
+          { name: "gokayfem/ComfyUI-fal-API", url: "https://github.com/gokayfem/ComfyUI-fal-API" },
+        ], "SeedVR2 upscale node. Needs a fal.ai API key — paid per call.", ICON_EXT),
+      );
+      helpOverlay.appendChild(packsList);
+      const packsNote = mk("div", { fontSize: "9px", color: C.muted, lineHeight: "1.6", marginTop: "2px" });
+      packsNote.innerHTML = "T2I and SCENE only need <b>rgthree-comfy</b> — the rest are per-tab. "
+        + "Everything else the templates use (KSampler, LoadImage, ResizeImageMaskNode, SaveImage…) is ComfyUI core. "
+        + "Apple Silicon: the float64→float32 MPS guard ships inside this node pack, nothing extra to install.";
+      helpOverlay.appendChild(packsNote);
+
+      helpOverlay.appendChild(helpSection("Links"));
+      const linksRow = mk("div", { display: "flex", gap: "5px", flexWrap: "wrap", paddingBottom: "6px" });
+      [
+        { name: "🌐 Krea", url: "https://www.krea.ai/" },
+        { name: "🤗 Comfy-Org/Krea-2", url: `${HF}/Comfy-Org/Krea-2` },
+        { name: "📖 ComfyUI Krea 2 guide", url: "https://docs.comfy.org/tutorials/image/krea/krea-2" },
+        { name: "🤗 Identity Edit LoRA", url: `${HF}/conradlocke/krea2-identity-edit` },
+      ].forEach(({ name, url }) => {
+        const a = mk("a", {
+          fontSize: "10px", color: C.muted, background: C.bg2,
+          border: `1px solid ${C.border}`, borderRadius: "5px", padding: "4px 10px",
+          textDecoration: "none", transition: "border-color .15s, color .15s",
+          display: "inline-block",
+        }, { href: url, target: "_blank", rel: "noopener" });
+        tx(a, name);
+        a.onmouseenter = () => { a.style.borderColor = C.text; a.style.color = C.text; };
+        a.onmouseleave = () => { a.style.borderColor = C.border; a.style.color = C.muted; };
+        linksRow.appendChild(noDrag(a));
+      });
+      helpOverlay.appendChild(linksRow);
 
       // ── image display helpers ──────────────────────────────────────────────
       function viewUrl(img) {

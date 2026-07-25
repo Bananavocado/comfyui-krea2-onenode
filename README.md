@@ -18,18 +18,34 @@ ln -s /path/to/comfyui-krea2-onenode <ComfyUI>/custom_nodes/comfyui-krea2-onenod
 
 Restart ComfyUI. The node appears as **One Node · Krea 2** (category "One Node").
 
-Requires [rgthree-comfy](https://github.com/rgthree/rgthree-comfy)
-(Power Lora Loader + Seed nodes used by the workflow template).
+The **✦ Help** button in the node lists every model and node pack below with
+direct download links.
 
-## Models (fixed in the template)
+### Required custom node packs
 
-| Slot | File |
+| Pack | Needed by |
 |---|---|
-| Diffusion | `krea2_turbo_bf16.safetensors` |
-| Text encoder | `qwen3vl_4b_fp8_scaled.safetensors` (type `krea2`) |
-| VAE | `qwen_image_vae.safetensors` |
+| [rgthree-comfy](https://github.com/rgthree/rgthree-comfy) | all tabs (Power Lora Loader, Seed) |
+| [comfyui-krea2edit](https://github.com/lbouaraba/comfyui-krea2edit) | EDIT |
+| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | T2I HQ (ClownsharKSampler_Beta) |
+| [ComfyUI-Krea2T-Enhancer](https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer) | T2I HQ |
+| [ComfyUI_LayerStyle](https://github.com/chflame163/ComfyUI_LayerStyle) | T2I HQ (grain) |
+| [was-node-suite-comfyui](https://github.com/WASasquatch/was-node-suite-comfyui) | T2I HQ (Lucy Sharpen) |
+| [ComfyUI-fal-API](https://github.com/gokayfem/ComfyUI-fal-API) | UPSCALE (paid fal.ai key) |
 
-To change them, edit `workflows/generate_workflow.json`.
+Everything else the templates use is ComfyUI core. T2I and SCENE only need
+rgthree-comfy.
+
+## Models (fixed in the templates)
+
+| Slot | File | From |
+|---|---|---|
+| Diffusion | `krea2_turbo_bf16.safetensors` | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2/tree/main/diffusion_models) |
+| Text encoder | `qwen3vl_4b_fp8_scaled.safetensors` (type `krea2`) | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2/tree/main/text_encoders) |
+| VAE | `qwen_image_vae.safetensors` | [Comfy-Org/Krea-2](https://huggingface.co/Comfy-Org/Krea-2/tree/main/vae) |
+| Identity Edit LoRA (EDIT tab) | `krea2_identity_edit_v1_2.safetensors` | [conradlocke/krea2-identity-edit](https://huggingface.co/conradlocke/krea2-identity-edit) |
+
+To change them, edit `workflows/*.json` (or pick a different model in Settings).
 
 ## Usage
 
