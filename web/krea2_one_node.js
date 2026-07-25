@@ -569,7 +569,7 @@ if (!window.__krea2_listeners) {
           .then(d => { if (!d.ok) a.setStatus?.(`Copy-back failed: ${d.error}`, C.warn); })
           .catch(() => {});
       }
-      a.showBatch(br.images);
+      a.galAdd(imgs);
       a.showImage(imgs[0]);
       return;
     }
@@ -579,11 +579,11 @@ if (!window.__krea2_listeners) {
       const sc = a.S._scene;
       sc.images = sc.images || [];
       sc.images.push(...imgs);
-      a.showBatch(sc.images);
+      a.galAdd(imgs);
       a.showImage(imgs[0]);
       return;
     }
-    a.showBatch(imgs);
+    a.galAdd(imgs);
     a.showImage(imgs[0]);
   });
 
@@ -3008,22 +3008,33 @@ app.registerExtension({
         pushOutput(img);
         syncThumbSel();
       }
+      // Append `imgs` to whatever the strip already holds. The strip is a
+      // session gallery: it accumulates across runs and is emptied only by the
+      // ✕ Clear chip, never by starting a new generation.
+      function galAdd(imgs) { showBatch(_gallery.concat(imgs)); }
       function showBatch(images) {
+        // Incremental. Blowing the strip away and rebuilding it with the same
+        // srcs on every finished job left every thumb blank (zero-width until
+        // its image re-decoded) — only touch the tail that actually changed.
+        const kids = [...thumbScroller.children];
+        let keep = 0;
+        while (keep < kids.length && keep < images.length && imgEq(kids[keep]._img, images[keep])) keep++;
+        for (let i = kids.length - 1; i >= keep; i--) kids[i].remove();
         _gallery = images.slice();
-        const prevCount = thumbScroller.childElementCount;
-        thumbScroller.replaceChildren();
         if (!images.length) { thumbStrip.style.display = "none"; lbSyncGallery(); return; }
         thumbStrip.style.display = "flex";
-        images.forEach((img, i) => {
+        images.slice(keep).forEach((img, k) => {
+          const i = keep + k;
           const w = mk("div", {
             position: "relative", flexShrink: "0", borderRadius: "8px",
             cursor: "pointer", lineHeight: "0", overflow: "hidden",
             border: "1px solid rgba(255,255,255,.13)", opacity: ".55",
+            // Reserve a slot so a not-yet-decoded thumb isn't zero-width.
+            minWidth: "32px", minHeight: "54px", background: "rgba(255,255,255,.05)",
             transition: "transform .18s cubic-bezier(.22,1,.36,1), box-shadow .18s ease, border-color .18s ease, opacity .18s ease",
           });
-          // Only images fresh this rebuild animate in (the strip regrows on
-          // every finished job of a rolling queue).
-          if (i >= prevCount) w.style.animation = "k2-thumb-in .28s cubic-bezier(.22,1,.36,1)";
+          // Everything built here is new to the strip, so it animates in.
+          w.style.animation = "k2-thumb-in .28s cubic-bezier(.22,1,.36,1)";
           const im = mk("img", { height: "54px", display: "block", pointerEvents: "none" }, { src: viewUrl(img), draggable: false });
           const num = mk("div", {
             position: "absolute", top: "3px", left: "3px", fontSize: "8px",
@@ -3527,7 +3538,7 @@ app.registerExtension({
           setStatus("Queued…");
         }
         window.__krea2_active = {
-          S, showImage, showBatch, showPreviewBlob, setStatus, setStage,
+          S, showImage, showBatch, galAdd, showPreviewBlob, setStatus, setStage,
           syncQueueUI, registerCompare, prog: currentProgPlan(), done: finishGenerate,
         };
         return first;
@@ -3996,7 +4007,7 @@ app.registerExtension({
           syncSceneLock();
           // Register before the first POST — the first job can start emitting
           // events while later rows are still being queued.
-          window.__krea2_active = { S, showImage, showBatch, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate, sceneRowUpdate };
+          window.__krea2_active = { S, showImage, showBatch, galAdd, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate, sceneRowUpdate };
           let lastSeed = null, seq = 0, rowsQueued = 0, failed = null;
           queueLoop:
           for (let si = 0; si < rows.length; si++) {
