@@ -2721,10 +2721,6 @@ app.registerExtension({
           { name: "…_v1_2_r128", url: `${IDE}/krea2_identity_edit_v1_2_r128.safetensors` },
           { name: "…_v1_2_r64", url: `${IDE}/krea2_identity_edit_v1_2_r64.safetensors` },
         ], "Required by the EDIT tab (hardwired at strength 1.0, no UI control). r128/r64 are the smaller low-VRAM ranks — rename to krea2_identity_edit_v1_2.safetensors or edit workflows/edit_workflow.json."),
-        helpRow("Style LoRAs (optional)", "→ models/loras/", [
-          { name: "Comfy-Org Krea 2 LoRAs", url: `${HF}/Comfy-Org/Krea-2/tree/main/loras`, },
-          { name: "Civitai · Krea 2", url: "https://civitai.com/models?baseModel=Krea%202" },
-        ], "Anything you drop in models/loras/ shows up in the LORAS rows."),
         helpRow("Upscale Model", "→ none (cloud)", [
           { name: "fal.ai · SeedVR2 upscale", url: "https://fal.ai/models/fal-ai/seedvr/upscale/image" },
         ], "The UPSCALE tab calls fal.ai — nothing to download, but it is a PAID API call per image and needs a FAL_KEY in the fal-api node pack's config.ini."),
