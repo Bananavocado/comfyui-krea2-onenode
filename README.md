@@ -1,8 +1,9 @@
 # One Node · Krea 2
 
-A single ComfyUI custom node that replaces the multi-node Krea 2 two-pass
-workflow with one dashboard: prompt, LoRA stack, size presets, seed, and a
-two-pass generate (base + latent hi-res refine).
+A single ComfyUI custom node that replaces a stack of multi-node Krea 2
+workflows with one dashboard: prompt, LoRA stack, size presets, seed, and a
+two-pass ClownsharK generate (base + same-resolution refine), plus scene
+queues, instruction editing and SeedVR2 upscaling.
 
 Architecture follows [one-node-flux-2-klein](https://github.com/lum3on/one-node-flux-2-klein):
 the Python side is a placeholder node plus a few REST routes; the frontend
@@ -56,13 +57,15 @@ To change them, edit `workflows/*.json` (or pick a different model in Settings).
    final image lands there and (with Auto-save on) in
    `output/krea2-onenode/`.
 4. With Auto-save off, results are temporary — click **Save** to keep one.
-5. ⚙ opens per-pass sampler settings (steps/cfg/sampler/scheduler,
-   pass-2 start step, upscale method/factor). Defaults match the original
-   tuned workflow (pass 1: 8 steps cfg 1 euler/simple; pass 2: 10 steps
-   cfg 0.8 dpmpp_2m_sde/sgm_uniform, start 5; upscale bislerp ×1.8).
+5. The ADVANCED toggle opens per-pass sampler settings (ClownsharK
+   steps/cfg/sampler/scheduler for pass 1; denoise/eta/cfg/sampler/scheduler
+   for the same-resolution pass 2) plus the Grain and Sharpen post steps.
+   Defaults match the tuned workflow: pass 1 = 8 steps cfg 1 linear/euler +
+   simple; pass 2 = denoise 0.2, eta 0.9, exponential/res_2s + bong_tangent.
 
-UI state persists in browser localStorage. The greyed mode pills
-(I2I, EDIT, …) are placeholders for later phases.
+Tabs: **T2I**, **SCENE** (queue several prompts in one run), **EDIT**
+(instruction editing, mask or reference), **UPSCALE** (SeedVR2). UI state
+persists in browser localStorage.
 
 ## Apple Silicon (MPS) compatibility
 

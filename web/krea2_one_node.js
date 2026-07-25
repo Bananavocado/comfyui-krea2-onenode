@@ -42,8 +42,7 @@ const LEGACY_PRESET_MAP = {
 
 const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "res_multistep", "lcm", "ddim", "uni_pc", "er_sde"];
 const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", "beta", "linear_quadratic", "kl_optimal"];
-const UPSCALE_METHODS = ["bislerp", "nearest-exact", "bilinear", "area", "bicubic"];
-const MODES = ["T2I", "I2I", "EDIT", "PAINT", "FACESWAP", "POSE", "UPSCALE"];
+const MODES = ["T2I", "EDIT", "UPSCALE"];
 
 // Scene tab: allowed per-row batch sizes and the rough per-image duration used
 // for the pre-run time estimate (user's machine averages ~2.5 min/image).
@@ -68,11 +67,7 @@ function defaultState() {
     modelUnet: "krea2_turbo_bf16.safetensors",
     modelClip: "qwen3vl_4b_fp8_scaled.safetensors",
     modelVae: "qwen_image_vae.safetensors",
-    p1: { steps: 8, cfg: 1.0, sampler: "euler", scheduler: "simple", endStep: 8 },
-    p2: { steps: 10, cfg: 0.8, sampler: "dpmpp_2m_sde", scheduler: "sgm_uniform", startStep: 5 },
-    upscaleMethod: "bislerp",
-    upscaleBy: 1.8,
-    // T2I HQ (quality template): ClownsharK two-pass, same-res refine, no upscale.
+    // T2I (quality template): ClownsharK two-pass, same-res refine, no upscale.
     q: {
       p1Steps: 8, p1Cfg: 1.0, p1Sampler: "linear/euler", p1Sched: "simple",
       denoise: 0.2, eta: 0.9, p2Cfg: 1.0, p2Sampler: "exponential/res_2s", p2Sched: "bong_tangent",
@@ -89,7 +84,7 @@ function defaultState() {
       refBoost: 4, refBoostA: 1, fitMode: "fit", groundingPx: 768,
       steps: 10, cfg: 1, sampler: "euler", scheduler: "simple", denoise: 1,
     },
-    tab: "t2i",                 // "t2i" | "t2iq" | "scene" | "upscale" | "edit"
+    tab: "t2i",                 // "t2i" | "scene" | "upscale" | "edit"
     sceneRows: [{ prompt: "", batch: 1 }],
   };
 }
@@ -113,7 +108,11 @@ function loadState() {
     delete s.edit.growPx; delete s.edit.blurRad;   // stale: composite chain removed
     if (!["none", "mask", "ref"].includes(s.edit.mode)) s.edit.mode = "none";
     if (![1, 1.5, 2.25].includes(s.edit.mp)) s.edit.mp = 1;
-    if (!["t2i", "t2iq", "scene", "upscale", "edit"].includes(s.tab)) s.tab = "t2i";
+    // The legacy turbo T2I pipeline is gone — its tab, template and per-pass
+    // settings collapsed into the (former) HQ one, which is now just "T2I".
+    if (s.tab === "t2iq") s.tab = "t2i";
+    delete s.p1; delete s.p2; delete s.upscaleMethod; delete s.upscaleBy;
+    if (!["t2i", "scene", "upscale", "edit"].includes(s.tab)) s.tab = "t2i";
     if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
     s.sceneRows = s.sceneRows.map(r => ({
       prompt: typeof r?.prompt === "string" ? r.prompt : "",
@@ -827,22 +826,18 @@ app.registerExtension({
 
       // ── toolbar ────────────────────────────────────────────────────────────
       const toolbar = mk("div", { display: "flex", alignItems: "center", gap: "5px", flex: "0 0 auto" });
-      let pillT2I, pillQ, pillScene, pillUp, pillEdit;
+      let pillT2I, pillScene, pillUp, pillEdit;
       for (const m of MODES) {
-        const enabled = m === "T2I" || m === "UPSCALE" || m === "EDIT";
         const p = Pill(m,
           (m === "T2I" && S.tab === "t2i") || (m === "UPSCALE" && S.tab === "upscale") || (m === "EDIT" && S.tab === "edit"),
-          m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : m === "EDIT" ? () => setTab("edit") : () => {},
-          !enabled);
-        if (!enabled) p.title = `${m} — coming in a later phase`;
+          m === "T2I" ? () => setTab("t2i") : m === "UPSCALE" ? () => setTab("upscale") : () => setTab("edit"),
+          false);
         if (m === "UPSCALE") { pillUp = p; p.title = "Upscale — SeedVR2 (fal.ai API, paid) folder batch"; }
         if (m === "EDIT") { pillEdit = p; p.title = "Edit — instruction-driven image editing (mask / reference)"; }
         toolbar.appendChild(p);
         if (m === "T2I") {
           pillT2I = p;
-          pillQ = Pill("T2I HQ", S.tab === "t2iq", () => setTab("t2iq"), false);
-          pillQ.title = "Quality T2I — ClownsharK two-pass + grain/sharpen (slower, no upscale)";
-          toolbar.appendChild(pillQ);
+          p.title = "Text to image — ClownsharK two-pass + grain/sharpen";
           pillScene = Pill("SCENE", S.tab === "scene", () => setTab("scene"), false);
           pillScene.title = "Scene — queue multiple prompts in one run";
           toolbar.appendChild(pillScene);
@@ -1310,10 +1305,8 @@ app.registerExtension({
         orientBtn.style.opacity = sq ? ".35" : "1";
         orientBtn.style.cursor = sq ? "default" : "pointer";
         tx(orientBtn, d.w >= d.h ? "▭" : "▯");
-        // HQ template refines at the same resolution — no latent upscale.
-        tx(finalTxt, S.tab === "t2iq"
-          ? `${d.w}×${d.h} (no upscale)`
-          : `${d.w}×${d.h} → ${Math.round(d.w * S.upscaleBy)}×${Math.round(d.h * S.upscaleBy)}`);
+        // Pass 2 refines at the same resolution — there is no latent upscale.
+        tx(finalTxt, `${d.w}×${d.h}`);
       }
 
       // BATCH
@@ -1429,21 +1422,12 @@ app.registerExtension({
         return w;
       };
 
-      // Per-mode sections: T2I (KSampler two-pass + upscale) vs T2I HQ
-      // (ClownsharK same-res refine). Seed row is shared between the two.
+      // Per-mode sections: T2I (ClownsharK two-pass, same-res refine),
+      // Upscale, Edit. The seed row is shared.
       const advSec = () => mk("div", { display: "flex", flexDirection: "column", gap: "8px" });
-      const advT2I1 = advSec(), advT2I2 = advSec(), advQ1 = advSec(), advQ2 = advSec();
+      const advQ1 = advSec(), advQ2 = advSec();
 
-      // pass 1
-      advT2I1.appendChild(advDivider("Pass 1 · base"));
-      const p1Steps = NI(S.p1.steps, 1, 100, 1, v => { S.p1.steps = v; S.p1.endStep = v; persist(); });
-      const p1Cfg = NI(S.p1.cfg, 0, 30, 0.1, v => { S.p1.cfg = v; persist(); });
-      advT2I1.appendChild(advGrid(["Steps", p1Steps], ["CFG", p1Cfg]));
-      const p1Samp = DD(() => SAMPLERS, S.p1.sampler, v => { S.p1.sampler = v; persist(); });
-      const p1Sched = DD(() => SCHEDULERS, S.p1.scheduler, v => { S.p1.scheduler = v; persist(); });
-      advT2I1.appendChild(advGrid(["Sampler", p1Samp], ["Sched", p1Sched]));
-
-      // T2I HQ pass 1 — ClownsharK sampler/scheduler option lists come from the
+      // T2I pass 1 — ClownsharK sampler/scheduler option lists come from the
       // live /object_info (huge RES4LYF list); until the fetch lands the DDs
       // offer just the template defaults.
       S._clown = {
@@ -1465,7 +1449,7 @@ app.registerExtension({
       const q1Samp = DD(() => S._clown.samplers, S.q.p1Sampler, v => { S.q.p1Sampler = v; persist(); });
       const q1Sched = DD(() => S._clown.schedulers, S.q.p1Sched, v => { S.q.p1Sched = v; persist(); });
       advQ1.appendChild(advGrid(["Sampler", q1Samp], ["Sched", q1Sched]));
-      advPanel.append(advT2I1, advQ1);
+      advPanel.append(advQ1);
 
       // seed (reference keeps seed in the advanced box)
       const seedIn = NI(S.seed, 0, 1e15, 1, (v) => { S.seed = Math.max(0, Math.floor(v || 0)); persist(); });
@@ -1502,23 +1486,7 @@ app.registerExtension({
       advPanel.appendChild(seedRowEl);
       syncSeedUI();
 
-      // pass 2
-      advT2I2.appendChild(advDivider("Pass 2 · refine"));
-      const p2Steps = NI(S.p2.steps, 1, 100, 1, v => { S.p2.steps = v; persist(); });
-      const p2Cfg = NI(S.p2.cfg, 0, 30, 0.1, v => { S.p2.cfg = v; persist(); });
-      const p2Start = NI(S.p2.startStep, 0, 100, 1, v => { S.p2.startStep = v; persist(); });
-      advT2I2.appendChild(advGrid(["Steps", p2Steps], ["CFG", p2Cfg], ["Start", p2Start]));
-      const p2Samp = DD(() => SAMPLERS, S.p2.sampler, v => { S.p2.sampler = v; persist(); });
-      const p2Sched = DD(() => SCHEDULERS, S.p2.scheduler, v => { S.p2.scheduler = v; persist(); });
-      advT2I2.appendChild(advGrid(["Sampler", p2Samp], ["Sched", p2Sched]));
-
-      // upscale
-      advT2I2.appendChild(advDivider("Upscale (latent)"));
-      const upMeth = DD(() => UPSCALE_METHODS, S.upscaleMethod, v => { S.upscaleMethod = v; persist(); });
-      const upFac = NI(S.upscaleBy, 1, 4, 0.05, v => { S.upscaleBy = v; persist(); syncSize(); });
-      advT2I2.appendChild(advGrid(["Method", upMeth], ["×", upFac]));
-
-      // T2I HQ pass 2 (same-res refine; steps = ceil(denoise × 8))
+      // T2I pass 2 (same-res refine; steps = ceil(denoise × 8))
       advQ2.appendChild(advDivider("Pass 2 · refine"));
       const q2Den = NI(S.q.denoise, 0.05, 1, 0.05, v => { S.q.denoise = isFinite(v) ? Math.min(1, Math.max(0.05, v)) : 0.2; persist(); });
       const q2Eta = NI(S.q.eta, 0, 2, 0.05, v => { S.q.eta = isFinite(v) ? v : 0.9; persist(); });
@@ -1539,7 +1507,7 @@ app.registerExtension({
       advQ2.append(advPostRow("Grain", qGrainTog, qGrain), advPostRow("Sharpen", qSharpTog, qSharp));
       // (Krea2T-Enhancer stays at the template default — enabled, strength 1.5 —
       // with no UI control, per user preference.)
-      advPanel.append(advT2I2, advQ2);
+      advPanel.append(advQ2);
 
       // Upscale tab section: SeedVR2 noise scale (seed row stays hidden —
       // the template pins seed -1, i.e. fal picks a random one per call).
@@ -1584,11 +1552,9 @@ app.registerExtension({
 
       const syncAdv = () => {
         advPanel.style.display = S.advancedUI ? "flex" : "none";
-        const q = S.tab === "t2iq", up = S.tab === "upscale", ed = S.tab === "edit";
-        advT2I1.style.display = q || up || ed ? "none" : "flex";
-        advT2I2.style.display = q || up || ed ? "none" : "flex";
-        advQ1.style.display = q && !up ? "flex" : "none";
-        advQ2.style.display = q && !up ? "flex" : "none";
+        const up = S.tab === "upscale", ed = S.tab === "edit";
+        advQ1.style.display = up || ed ? "none" : "flex";
+        advQ2.style.display = up || ed ? "none" : "flex";
         advU.style.display = up ? "flex" : "none";
         advE.style.display = ed ? "flex" : "none";
         seedRowEl.style.display = up ? "none" : "grid";
@@ -1834,7 +1800,6 @@ app.registerExtension({
       function syncTab() {
         const scene = S.tab === "scene", up = S.tab === "upscale", ed = S.tab === "edit";
         setPillActive(pillT2I, S.tab === "t2i");
-        setPillActive(pillQ, S.tab === "t2iq");
         setPillActive(pillScene, scene);
         setPillActive(pillUp, up);
         setPillActive(pillEdit, ed);
@@ -2368,19 +2333,14 @@ app.registerExtension({
           tx(progPct, Math.round(pct) + "%");
         }
       };
-      // Unified-progress plan: pass 1 owns 0→split of the bar, pass 2 the
-      // rest. p2Start = start_at_step of the legacy pass 2 (its progress
-      // values begin there, not at 0 — the handler rebases with it).
+      // Unified-progress plan: pass 1 owns 0→split of the bar, pass 2 the rest.
+      // p2Start stays for the handler's rebase arithmetic — both ClownsharK
+      // passes report from 0, so it is always 0 here.
       function currentProgPlan() {
         if (S.tab === "upscale") return { split: 1, p2Start: 0 };  // single stage
         if (S.tab === "edit") return { split: 1, p2Start: 0 };     // single KSampler
-        if (S.tab === "t2iq") {
-          const p1 = S.q.p1Steps, p2 = Math.max(1, Math.ceil(S.q.denoise * 8));
-          return { split: p1 / (p1 + p2), p2Start: 0 };
-        }
-        const p1 = S.p1.steps;
-        const p2 = Math.max(1, S.p2.steps - S.p2.startStep);
-        return { split: p1 / (p1 + p2), p2Start: S.p2.startStep };
+        const p1 = S.q.p1Steps, p2 = Math.max(1, Math.ceil(S.q.denoise * 8));
+        return { split: p1 / (p1 + p2), p2Start: 0 };
       }
       // Running mode: full overlay (bar + detail + %). Idle mode: status text
       // and frozen timer only — used after a run ends and for standalone
@@ -2766,16 +2726,16 @@ app.registerExtension({
         helpRow("comfyui-krea2edit", "→ EDIT", [
           { name: "lbouaraba/comfyui-krea2edit", url: "https://github.com/lbouaraba/comfyui-krea2edit" },
         ], "Krea2EditModelPatch + Krea2EditGroundedEncode.", ICON_EXT, "Krea2EditModelPatch"),
-        helpRow("RES4LYF", "→ T2I HQ", [
+        helpRow("RES4LYF", "→ T2I", [
           { name: "ClownsharkBatwing/RES4LYF", url: "https://github.com/ClownsharkBatwing/RES4LYF" },
         ], "ClownsharKSampler_Beta — both HQ passes.", ICON_EXT, "ClownsharKSampler_Beta"),
-        helpRow("Krea2T-Enhancer", "→ T2I HQ", [
+        helpRow("Krea2T-Enhancer", "→ T2I", [
           { name: "capitan01R/ComfyUI-Krea2T-Enhancer", url: "https://github.com/capitan01R/ComfyUI-Krea2T-Enhancer" },
         ], "Model patch in the HQ chain (enabled, strength 1.5).", ICON_EXT, "ComfyUI-Krea2T-Enhancer"),
-        helpRow("ComfyUI_LayerStyle", "→ T2I HQ", [
+        helpRow("ComfyUI_LayerStyle", "→ T2I", [
           { name: "chflame163/ComfyUI_LayerStyle", url: "https://github.com/chflame163/ComfyUI_LayerStyle" },
         ], "LayerFilter: AddGrain — the HQ Grain post step.", ICON_EXT, "LayerFilter: AddGrain"),
-        helpRow("WAS Node Suite", "→ T2I HQ", [
+        helpRow("WAS Node Suite", "→ T2I", [
           { name: "WASasquatch/was-node-suite-comfyui", url: "https://github.com/WASasquatch/was-node-suite-comfyui" },
         ], "Image Lucy Sharpen — the HQ Sharpen post step.", ICON_EXT, "Image Lucy Sharpen"),
         helpRow("ComfyUI-fal-API", "→ UPSCALE", [
@@ -2787,7 +2747,8 @@ app.registerExtension({
       const packsNote = mk("div", { fontSize: "9px", color: C.muted, lineHeight: "1.6", marginTop: "2px" });
       packsNote.innerHTML = "Install everything missing in one go: run <b>install_deps.sh</b> in this node's folder "
         + "(macOS: double-click <b>Install Dependencies.command</b>), then restart ComfyUI. "
-        + "T2I and SCENE only need <b>rgthree-comfy</b> — the rest are per-tab. "
+        + "<b>rgthree-comfy</b> is needed everywhere; T2I and SCENE also need RES4LYF, Krea2T-Enhancer, "
+        + "LayerStyle and WAS; EDIT needs krea2edit; UPSCALE needs fal-API. "
         + "Everything else the templates use (KSampler, LoadImage, ResizeImageMaskNode, SaveImage…) is ComfyUI core. "
         + "Apple Silicon: the float64→float32 MPS guard ships inside this node pack, nothing extra to install.";
       helpOverlay.appendChild(packsNote);
@@ -3244,8 +3205,8 @@ app.registerExtension({
       }
 
       // ── template patch + submit ────────────────────────────────────────────
-      const _templates = {};   // "generate" (T2I/Scene) | "quality" (T2I HQ) | "upscale" | "edit"
-      async function getTemplate(which = "generate") {
+      const _templates = {};   // "quality" (T2I/Scene) | "upscale" | "edit"
+      async function getTemplate(which = "quality") {
         if (!_templates[which]) {
           const r = await api.fetchApi(`/krea2_onenode/workflow_${which}`);
           if (!r.ok) throw new Error(`template fetch failed (${r.status})`);
@@ -3256,14 +3217,12 @@ app.registerExtension({
 
       // Default opts reproduce the single-run T2I behavior exactly; the Scene
       // tab overrides prompt/batch/seed per queued row and forces SaveImage.
-      // Works on both templates: node ids are prefixed "K2:" (generate) or
-      // "K2Q:" (quality) — detected from the template itself.
+      // Both use the quality template ("K2Q:" node ids).
       function buildPrompt(tpl, o = {}) {
         const { promptText = S.prompt, batch = S.batch, seed = null, forceSave = false } = o;
         const p = JSON.parse(JSON.stringify(tpl));
         const d = dims();
-        const q = !!p["K2Q:unet"];
-        const id = (k) => (q ? "K2Q:" : "K2:") + k;
+        const id = (k) => "K2Q:" + k;
 
         p[id("unet")].inputs.unet_name = S.modelUnet;
         p[id("clip")].inputs.clip_name = S.modelClip;
@@ -3294,8 +3253,8 @@ app.registerExtension({
           li++;
         }
 
-        if (q) {
-          // Quality (ClownsharK): pass 2 refines the pass-1 latent at the same
+        {
+          // ClownsharK: pass 2 refines the pass-1 latent at the same
           // resolution; its step count follows the source workflow's
           // ceil(denoise × 8) expression. Krea2T-Enhancer keeps its template
           // default (enabled, strength 1.5).
@@ -3323,19 +3282,6 @@ app.registerExtension({
           }
           p["K2Q:save"].inputs.images =
             sharpOn ? ["K2Q:sharp", 0] : grainOn ? ["K2Q:grain", 0] : ["K2Q:decode", 0];
-        } else {
-          p["K2:sampler1"].inputs.steps = S.p1.steps;
-          p["K2:sampler1"].inputs.cfg = S.p1.cfg;
-          p["K2:sampler1"].inputs.sampler_name = S.p1.sampler;
-          p["K2:sampler1"].inputs.scheduler = S.p1.scheduler;
-          p["K2:sampler1"].inputs.end_at_step = S.p1.endStep;
-          p["K2:sampler2"].inputs.steps = S.p2.steps;
-          p["K2:sampler2"].inputs.cfg = S.p2.cfg;
-          p["K2:sampler2"].inputs.sampler_name = S.p2.sampler;
-          p["K2:sampler2"].inputs.scheduler = S.p2.scheduler;
-          p["K2:sampler2"].inputs.start_at_step = S.p2.startStep;
-          p["K2:upscale"].inputs.upscale_method = S.upscaleMethod;
-          p["K2:upscale"].inputs.scale_by = S.upscaleBy;
         }
 
         // auto-save off → PreviewImage (temp) instead of SaveImage
@@ -3366,7 +3312,7 @@ app.registerExtension({
       // Start (or join) the rolling batch-run and (re-)register the active
       // handlers — jobs already running keep emitting events while new ones
       // are queued, and each click refreshes the progress plan snapshot for
-      // the latest settings. Shared by T2I/T2I HQ generates and upscales.
+      // the latest settings. Shared by T2I generates, Scene runs and upscales.
       function startBatchRun() {
         const first = !S._batchRun;
         if (first) {
@@ -3388,7 +3334,7 @@ app.registerExtension({
         if (!S.prompt.trim()) { setStatus("Enter a prompt first.", C.err); return; }
         S._submitting = true;
         try {
-          const tpl = await getTemplate(S.tab === "t2iq" ? "quality" : "generate");
+          const tpl = await getTemplate("quality");
           const first = startBatchRun();
           // Batch ×N queues N single-image jobs (seed, seed+1, …) — batched
           // latents degrade quality on MPS, and per-image jobs surface
@@ -3776,7 +3722,7 @@ app.registerExtension({
         setStatus("Queueing scene…");
         persist();
         try {
-          const tpl = await getTemplate();
+          const tpl = await getTemplate("quality");
           S.sceneRows.forEach((_, i) => sceneRowUpdate(i, "idle"));
           // Row batch ×N expands into N single-image jobs (seed, seed+1, …) —
           // same reasoning as the T2I batch: batched latents degrade quality

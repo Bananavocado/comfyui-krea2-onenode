@@ -57,9 +57,6 @@ def _serve_json(filename):
     return handler
 
 
-PromptServer.instance.routes.get("/krea2_onenode/workflow_generate")(
-    _serve_json("workflows/generate_workflow.json"))
-
 PromptServer.instance.routes.get("/krea2_onenode/workflow_quality")(
     _serve_json("workflows/quality_workflow.json"))
 
