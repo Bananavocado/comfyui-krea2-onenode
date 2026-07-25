@@ -38,6 +38,11 @@ fi
 
 # ── python for pip installs ──────────────────────────────────────────────────
 PY="${PYTHON:-}"
+if [ -n "$PY" ] && [ ! -x "$PY" ]; then
+  echo "!! PYTHON=$PY is not an executable file."
+  echo "   Find the interpreter ComfyUI actually runs on:  ps aux | grep '[m]ain.py'"
+  exit 1
+fi
 if [ -z "$PY" ]; then
   if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
     PY="$VIRTUAL_ENV/bin/python"

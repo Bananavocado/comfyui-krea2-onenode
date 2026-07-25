@@ -1187,13 +1187,15 @@ app.registerExtension({
       // (fed to LoadImage as an annotated name, no upload).
       const editBox = mk("div", { display: "none", flexDirection: "column", gap: "8px" });
 
-      // Single-image well (drop / click). getVal/setVal close over the slot.
-      function imageWell(capTxt, getVal, setVal, emptyMain) {
+      // Image well (drop / click). getVal/setVal close over the slot. With
+      // onExtra set the well takes MULTIPLE files: the first becomes the slot's
+      // image, the rest are handed over as a batch queue.
+      function imageWell(capTxt, getVal, setVal, emptyMain, onExtra) {
         const wrap = mk("div", { display: "flex", flexDirection: "column", gap: "4px" });
         const wcap = cap(capTxt); wcap.style.marginBottom = "0";
         wrap.appendChild(wcap);
         const fileInput = mk("input", { display: "none" },
-          { type: "file", accept: ".png,.jpg,.jpeg,.webp" });
+          { type: "file", accept: ".png,.jpg,.jpeg,.webp", multiple: !!onExtra });
         const well = mk("div", {
           border: `1.5px dashed ${C.borderH}`, borderRadius: "10px",
           padding: "10px", textAlign: "center", cursor: "pointer", position: "relative",
@@ -1206,7 +1208,8 @@ app.registerExtension({
           display: "none", pointerEvents: "none",
         }, { draggable: false });
         const mainL = tx(mk("div", { fontSize: "10px", fontWeight: "700", color: C.text, pointerEvents: "none" }), emptyMain);
-        const subL = tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "3px", pointerEvents: "none" }), "drop an image or click to browse");
+        const subL = tx(mk("div", { fontSize: "9px", color: C.muted, marginTop: "3px", pointerEvents: "none" }),
+          onExtra ? "drop images or click to browse — one job each" : "drop an image or click to browse");
         const nameL = mk("div", {
           fontSize: "9px", color: "rgba(240,255,65,.7)", marginTop: "4px", pointerEvents: "none",
           maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -1221,25 +1224,33 @@ app.registerExtension({
         clr.onmouseleave = () => clr.style.color = C.muted;
         clr.onclick = (e) => { e.stopPropagation(); setVal(null); syncEditUI(); };
         well.append(thumb, mainL, subL, nameL, clr, fileInput);
-        const setFromFile = (f) => {
-          if (!f || !IMG_RE.test(f.name)) { setStatus("PNG / JPG / WebP only.", C.err); return; }
+        // Read one File into a slot value (dimensions come from the decoded
+        // image, which is also what the output-size maths needs).
+        const readFile = (f) => new Promise((res) => {
+          if (!f || !IMG_RE.test(f.name)) { res(null); return; }
           const url = URL.createObjectURL(f);
           const im = new Image();
-          im.onload = () => {
-            setVal({ kind: "file", file: f, name: f.name, w: im.naturalWidth, h: im.naturalHeight, url });
-            syncEditUI();
-          };
-          im.onerror = () => { URL.revokeObjectURL(url); setStatus("Couldn't read that image.", C.err); };
+          im.onload = () => res({ kind: "file", file: f, name: f.name, w: im.naturalWidth, h: im.naturalHeight, url });
+          im.onerror = () => { URL.revokeObjectURL(url); res(null); };
           im.src = url;
+        });
+        const setFromFiles = async (files) => {
+          const list = [...(files || [])].filter(f => IMG_RE.test(f.name));
+          if (!list.length) { setStatus("PNG / JPG / WebP only.", C.err); return; }
+          const vals = (await Promise.all(list.map(readFile))).filter(Boolean);
+          if (!vals.length) { setStatus("Couldn't read that image.", C.err); return; }
+          setVal(vals[0]);
+          if (onExtra) onExtra(vals.slice(1));
+          syncEditUI();
         };
         well.onclick = () => fileInput.click();
-        fileInput.onchange = () => { setFromFile(fileInput.files?.[0]); fileInput.value = ""; };
+        fileInput.onchange = () => { setFromFiles(fileInput.files); fileInput.value = ""; };
         well.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); well.style.borderColor = LIME; well.style.background = "rgba(240,255,65,.05)"; });
         well.addEventListener("dragleave", () => { well.style.borderColor = C.borderH; well.style.background = "transparent"; });
         well.addEventListener("drop", (e) => {
           e.preventDefault(); e.stopPropagation();
           well.style.borderColor = C.borderH; well.style.background = "transparent";
-          setFromFile(e.dataTransfer?.files?.[0]);
+          setFromFiles(e.dataTransfer?.files);
         });
         wrap._sync = () => {
           const v = getVal();
@@ -1263,14 +1274,43 @@ app.registerExtension({
         if (old?.url) URL.revokeObjectURL(old.url);
         S._editSrc = v;
         S._editMask = null;
+        // Any new primary drops the extra queue — those belonged to the drop
+        // being replaced. A multi-file drop re-fills it right after this call.
+        setEditExtra(null);
       }
       function setEditRef(v) {
         const old = S._editRef;
         if (old?.url) URL.revokeObjectURL(old.url);
         S._editRef = v;
       }
-      const srcWell = imageWell("Source", () => S._editSrc, setEditSource, "Drop the image to edit");
+      // Extra sources (runtime only): dropping N images edits all of them with
+      // the same prompt and settings, one job each. The first is the primary
+      // source — it drives the preview thumb, the output-size maths and the
+      // mask editor; mask mode ignores the rest (a painted mask only lines up
+      // with the image it was drawn on).
+      const setEditExtra = (list) => {
+        (S._editExtra || []).forEach(v => { if (v.url) URL.revokeObjectURL(v.url); });
+        S._editExtra = list && list.length ? list : null;
+      };
+      const srcWell = imageWell("Source", () => S._editSrc, setEditSource,
+        "Drop image(s) to edit", setEditExtra);
       editBox.appendChild(srcWell);
+
+      const editQueueRow = mk("div", {
+        display: "none", alignItems: "center", gap: "6px",
+        fontSize: "9px", color: C.muted, marginTop: "-2px",
+      });
+      const editQueueTxt = mk("div", { flex: "1", minWidth: "0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+      const editQueueClr = mk("button", {
+        background: "transparent", border: "none", cursor: "pointer", color: C.muted,
+        fontSize: "11px", outline: "none", padding: "0 2px", flexShrink: "0",
+      }, { title: "Drop the extra images" });
+      tx(editQueueClr, "✕");
+      editQueueClr.onmouseenter = () => editQueueClr.style.color = C.err;
+      editQueueClr.onmouseleave = () => editQueueClr.style.color = C.muted;
+      editQueueClr.onclick = (e) => { e.stopPropagation(); setEditExtra(null); syncEditUI(); };
+      editQueueRow.append(editQueueTxt, noDrag(editQueueClr));
+      editBox.appendChild(editQueueRow);
 
       // Mode pills — mutually exclusive; click the active one to turn it off.
       const editModeRow = mk("div", { display: "flex", gap: "5px" });
@@ -1322,13 +1362,15 @@ app.registerExtension({
       const editDimsTxt = mk("div", { fontSize: "9px", fontWeight: "700", color: "rgba(240,255,65,.55)" });
       editBox.append(editOutRow, editDimsTxt);
 
-      function editDims() {
-        const s = S._editSrc;
+      // Output size for one source: its aspect at the MP target, rounded to
+      // /16. Each queued image gets its own dims — they need not share aspect.
+      function editDimsFor(s) {
         if (!s?.w || !s?.h) return null;
         const scale = Math.sqrt((S.edit.mp * 1e6) / (s.w * s.h));
         const r16 = (v) => Math.max(64, Math.round((v * scale) / 16) * 16);
         return { w: r16(s.w), h: r16(s.h) };
       }
+      function editDims() { return editDimsFor(S._editSrc); }
       function syncEditUI() {
         srcWell._sync();
         refWell._sync();
@@ -1342,6 +1384,17 @@ app.registerExtension({
         maskClr.style.display = S._editMask ? "" : "none";
         const d = editDims();
         tx(editDimsTxt, d ? `output ${d.w}×${d.h}` : "output — pick a source image");
+        // Extra sources: one job each, unless Mask mode is on (the mask is
+        // drawn against the first image, so the rest can't use it).
+        const extra = S._editExtra || [];
+        const maskMode = S.edit.mode === "mask";
+        editQueueRow.style.display = extra.length ? "flex" : "none";
+        if (extra.length) {
+          tx(editQueueTxt, maskMode
+            ? `+${extra.length} more ignored — Mask edits the first image only`
+            : `+${extra.length} more queued — ${extra.length + 1} images, one job each`);
+          editQueueTxt.style.color = maskMode ? C.warn : "rgba(240,255,65,.7)";
+        }
         syncGenEnabled();
       }
       // NOTE: no syncEditUI() here — genBtn doesn't exist yet (TDZ) and the
@@ -1969,13 +2022,22 @@ app.registerExtension({
       }
 
       // ---- right: preview ----
+      // Right column = preview box on top, thumb strip underneath. The strip
+      // used to float over the image and cut off its bottom edge, so it now
+      // gets its own row and the preview keeps the space it's given.
+      const rightCol = mk("div", {
+        flex: "1", minWidth: "0", minHeight: "0",
+        display: "flex", flexDirection: "column", gap: "8px",
+      });
+      mainRow.appendChild(rightCol);
+
       const right = mk("div", {
         flex: "1", minWidth: "0", minHeight: "0", position: "relative",
         background: "#000", borderRadius: "8px", overflow: "hidden",
         display: "flex", alignItems: "center", justifyContent: "center",
         border: `1px solid ${C.border}`,
       });
-      mainRow.appendChild(right);
+      rightCol.appendChild(right);
 
       const previewImg = mk("img", {
         maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "none",
@@ -2399,15 +2461,15 @@ app.registerExtension({
       overlayTR.append(cmpChip, upChip, clearChip, saveChip, useAsChip);
       right.appendChild(overlayTR);
 
-      // Thumb strip — frosted overlay bar: "n/total" counter + scrollable
-      // thumbnails. The selected thumb (the image in the preview) gets a lime
-      // ring, full opacity and a slight raise; the rest sit dimmed.
+      // Thumb strip — its own row under the preview box (never over the
+      // image): "n/total" counter + scrollable thumbnails. The selected thumb
+      // (the one in the preview) gets a lime ring, full opacity and a slight
+      // raise; the rest sit dimmed. Shown for a single result too, so one-off
+      // generations stay one click away; ✕ Clear empties it.
       const thumbStrip = mk("div", {
-        position: "absolute", left: "8px", right: "8px", bottom: "8px",
-        display: "none", alignItems: "center", gap: "4px", zIndex: "5",
-        padding: "5px 8px 5px 10px", background: "rgba(8,8,8,.72)",
-        backdropFilter: "blur(12px)", webkitBackdropFilter: "blur(12px)",
-        border: "1px solid rgba(255,255,255,.08)", borderRadius: "10px",
+        flexShrink: "0", display: "none", alignItems: "center", gap: "4px",
+        padding: "5px 8px 5px 10px", background: "rgba(16,16,16,.9)",
+        border: `1px solid ${C.border}`, borderRadius: "10px",
         boxSizing: "border-box",
       });
       const thumbCounter = mk("div", {
@@ -2422,11 +2484,10 @@ app.registerExtension({
       thumbScroller.className = "k2-thumbs";
       scrollGuard(thumbScroller, true);
       thumbStrip.append(thumbCounter, thumbScroller);
-      right.appendChild(thumbStrip);
+      rightCol.appendChild(thumbStrip);
 
       // Progress bar — overlaid at the bottom of the preview box, same design
       // as the one-node-flux-2-klein reference (gradient scrim, lime fill).
-      // pointerEvents none so batch thumbs behind it stay clickable.
       const progWrap = mk("div", {
         position: "absolute", bottom: "0", left: "0", right: "0",
         background: "linear-gradient(transparent,rgba(0,0,0,.88))",
@@ -2951,7 +3012,7 @@ app.registerExtension({
         _gallery = images.slice();
         const prevCount = thumbScroller.childElementCount;
         thumbScroller.replaceChildren();
-        if (images.length <= 1) { thumbStrip.style.display = "none"; lbSyncGallery(); return; }
+        if (!images.length) { thumbStrip.style.display = "none"; lbSyncGallery(); return; }
         thumbStrip.style.display = "flex";
         images.forEach((img, i) => {
           const w = mk("div", {
@@ -3685,7 +3746,9 @@ app.registerExtension({
       // mutually exclusive by UI construction.
       function buildEditPrompt(tpl, o) {
         const p = JSON.parse(JSON.stringify(tpl));
-        const d = editDims();
+        // Multi-source runs pass the dims of THEIR image; a single edit falls
+        // back to the primary source's.
+        const d = o.dims || editDims();
         p["K2E:unet"].inputs.unet_name = S.modelUnet;
         p["K2E:clip"].inputs.clip_name = S.modelClip;
         p["K2E:vae"].inputs.vae_name = S.modelVae;
@@ -3765,21 +3828,26 @@ app.registerExtension({
         if (!d) { setStatus("Couldn't read the source image size.", C.err); return; }
         S._submitting = true;
         try {
+          // Sources for this click: the primary plus any extra images dropped
+          // with it. Mask mode stays single — the mask only fits image one.
+          const sources = [src, ...(S.edit.mode === "mask" ? [] : (S._editExtra || []))];
           // Stage inputs once per click — every batch job reuses them.
           // (File sources may already be staged by the native mask editor.)
-          let srcName, before;
-          if (src.kind === "file") {
-            if (!src.uploadedName) {
-              setStatus("Uploading source…");
-              const up = await uploadSource(src.file);
-              src.uploadedName = up.imageName;
-              src.uploadedBefore = up.before;
+          const staged = [];
+          for (const s of sources) {
+            if (s.kind === "file") {
+              if (!s.uploadedName) {
+                setStatus(sources.length > 1
+                  ? `Uploading ${staged.length + 1}/${sources.length}…`
+                  : "Uploading source…");
+                const up = await uploadSource(s.file);
+                s.uploadedName = up.imageName;
+                s.uploadedBefore = up.before;
+              }
+              staged.push({ name: s.uploadedName, before: s.uploadedBefore, dims: editDimsFor(s) });
+            } else {
+              staged.push({ name: annotatedName(s.img), before: s.img, dims: editDimsFor(s) });
             }
-            srcName = src.uploadedName;
-            before = src.uploadedBefore;
-          } else {
-            srcName = annotatedName(src.img);
-            before = src.img;
           }
           let maskName = null;
           if (S.edit.mode === "mask") {
@@ -3810,22 +3878,29 @@ app.registerExtension({
           persist();
           const br = S._batchRun;
           let failed = null;
-          for (let i = 0; i < S.batch; i++) {
-            const prompt = buildEditPrompt(tpl, { seed: base + i, srcName, maskName, refName });
-            const resp = await api.fetchApi("/prompt", {
-              method: "POST", headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
-            });
-            const result = await resp.json();
-            if (!resp.ok || result.error) {
-              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
-              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
-                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
-              failed = { msg: nodeErrs || msg };
-              break;   // rest of this click's jobs would fail identically
+          // One job per image per batch step: 3 images × ×2 = 6 jobs. Each
+          // image keeps its own seed run so the batch stays reproducible.
+          outer:
+          for (const st of staged) {
+            for (let i = 0; i < S.batch; i++) {
+              const prompt = buildEditPrompt(tpl, {
+                seed: base + i, srcName: st.name, maskName, refName, dims: st.dims,
+              });
+              const resp = await api.fetchApi("/prompt", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+              });
+              const result = await resp.json();
+              if (!resp.ok || result.error) {
+                const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+                const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                  .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+                failed = { msg: nodeErrs || msg };
+                break outer;   // rest of this click's jobs would fail identically
+              }
+              br.jobs.set(result.prompt_id, { seq: br.total + 1, edit: true, before: st.before });
+              br.total++;
             }
-            br.jobs.set(result.prompt_id, { seq: br.total + 1, edit: true, before });
-            br.total++;
           }
           if (first && !br.total) {
             S._batchRun = null;
