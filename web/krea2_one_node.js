@@ -560,7 +560,7 @@ if (!window.__krea2_listeners) {
       // Upscale/edit jobs: remember the before/after pair for the compare
       // view, and copy folder-batch results back next to their source.
       if ((bjob.up || bjob.edit) && bjob.before)
-        a.registerCompare?.(imgs[0], bjob.before, bjob.edit ? "edit" : "up");
+        a.registerCompare?.(imgs[0], bjob.before, bjob.edit ? "edit" : "up", bjob.origin || null);
       if (bjob.copyTo) {
         api.fetchApi("/krea2_onenode/copy_result", {
           method: "POST", headers: { "Content-Type": "application/json" },
@@ -2989,9 +2989,14 @@ app.registerExtension({
       const cmpKey = (img) => `${img.filename}|${img.subfolder || ""}|${img.type || "output"}`;
       S._cmp = new Map();
       S._pfx = new Map();   // cmpKey → save_temp prefix ("up" | "edit")
-      function registerCompare(after, before, pfx = "up") {
+      // cmpKey → the exact inputs an edit job ran with {src, ref, mode, mask},
+      // so "Use as… → original input" can reload a failed result's setup and
+      // let the user try again. Runtime only.
+      S._orig = new Map();
+      function registerCompare(after, before, pfx = "up", origin = null) {
         S._cmp.set(cmpKey(after), before);
         S._pfx.set(cmpKey(after), pfx);   // save_temp prefix for this result
+        if (origin) S._orig.set(cmpKey(after), origin);
         S._cmpOn = true;   // fresh upscale/edit pops up in compare mode
       }
       let _gallery = [];   // images last passed to showBatch (lightbox nav + selection)
@@ -3123,34 +3128,76 @@ app.registerExtension({
       // "Use as…" — send the current result into the EDIT tab. view-kind
       // sources feed LoadImage the annotated "subfolder/file [type]" name,
       // so no re-upload happens.
-      function sendToEdit(img, slot) {
-        const im = new Image();
-        im.onload = () => {
-          const v = { kind: "view", img, name: img.filename, w: im.naturalWidth, h: im.naturalHeight };
-          if (slot === "ref") {
-            setEditRef(v);
-            S.edit.mode = "ref";   // person slot implies Reference mode
-          } else {
-            setEditSource(v);      // also drops any painted mask
+      // Decode an image descriptor into an edit-slot value (the wells need the
+      // pixel dimensions for the output-size maths).
+      function viewVal(img) {
+        return new Promise((res, rej) => {
+          const im = new Image();
+          im.onload = () => res({ kind: "view", img, name: img.filename, w: im.naturalWidth, h: im.naturalHeight });
+          im.onerror = () => rej(new Error("load failed"));
+          im.src = viewUrl(img);
+        });
+      }
+      async function sendToEdit(img, slot) {
+        let v;
+        try { v = await viewVal(img); }
+        catch (e) { setStatus("Couldn't load that image.", C.err); return; }
+        if (slot === "ref") {
+          setEditRef(v);
+          S.edit.mode = "ref";   // person slot implies Reference mode
+        } else {
+          setEditSource(v);      // also drops any painted mask
+        }
+        persist();
+        if (S.tab !== "edit") setTab("edit");
+        else { syncEditUI(); syncAdv(); }
+        setStatus(slot === "ref" ? "Sent to Edit as the person reference." : "Sent to Edit as the source image.");
+      }
+      // Reload the inputs a result was made from, so a bad generation can be
+      // re-run with a different prompt/seed instead of hunting for the source
+      // again. Edit results restore source + person + mode (+ the painted mask
+      // when it was made in the native editor, which lives server-side);
+      // upscale results only have a source recorded.
+      async function loadOriginalInput(after) {
+        const key = cmpKey(after);
+        const o = S._orig.get(key) || (S._cmp.has(key) ? { src: S._cmp.get(key) } : null);
+        if (!o?.src) { setStatus("No original input recorded for this result.", C.warn); return; }
+        let src;
+        try { src = await viewVal(o.src); }
+        catch (e) { setStatus("The original input is gone from disk.", C.err); return; }
+        setEditSource(src);   // clears the mask + extras; both are re-set below
+        let lostRef = false;
+        if (o.mode !== undefined) {   // full edit origin — restore mode + person too
+          let ref = null;
+          if (o.ref) {
+            try { ref = await viewVal(o.ref); } catch (e) { lostRef = true; }
           }
-          persist();
-          if (S.tab !== "edit") setTab("edit");
-          else { syncEditUI(); syncAdv(); }
-          setStatus(slot === "ref" ? "Sent to Edit as the person reference." : "Sent to Edit as the source image.");
-        };
-        im.onerror = () => setStatus("Couldn't load that image.", C.err);
-        im.src = viewUrl(img);
+          setEditRef(ref);
+          S.edit.mode = lostRef ? "none" : (o.mode || "none");
+          if (o.mask) S._editMask = { name: o.mask };
+        }
+        persist();
+        if (S.tab !== "edit") setTab("edit");
+        else { syncEditUI(); syncAdv(); }
+        setStatus(lostRef
+          ? "Original source loaded — the person image is gone from disk."
+          : "Original input loaded — change the prompt or seed and run again.",
+          lostRef ? C.warn : C.text);
       }
       function openUseAsMenu(anchor) {
         const img = S.lastImage;
         if (!img?.filename) return;
+        const key = cmpKey(img);
+        const hasOrig = S._orig.has(key) || S._cmp.has(key);
         ctxMenu.replaceChildren(
           ctxItem("✎", "Edit — source image", () => sendToEdit(img, "src")),
           ctxItem("👤", "Edit — person (reference)", () => sendToEdit(img, "ref")),
+          // Only results we made from a known input can offer this.
+          ...(hasOrig ? [ctxItem("↺", "Edit — original input", () => loadOriginalInput(img))] : []),
         );
         const r = anchor.getBoundingClientRect();
         ctxMenu.style.left = Math.min(r.left, window.innerWidth - 220) + "px";
-        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 90) + "px";
+        ctxMenu.style.top = Math.min(r.bottom + 4, window.innerHeight - 118) + "px";
         ctxMenu.style.display = "flex";
         document.addEventListener("pointerdown", ctxDoc, true);
       }
@@ -3870,14 +3917,17 @@ app.registerExtension({
               ({ imageName: maskName } = await uploadSource(mf));
             }
           }
-          let refName = null;
+          let refName = null, refBefore = null;
           if (S.edit.mode === "ref") {
             const ref = S._editRef;
             if (ref.kind === "file") {
               setStatus("Uploading person image…");
-              ({ imageName: refName } = await uploadSource(ref.file));
+              const up = await uploadSource(ref.file);
+              refName = up.imageName;
+              refBefore = up.before;
             } else {
               refName = annotatedName(ref.img);
+              refBefore = ref.img;
             }
           }
           const tpl = await getTemplate("edit");
@@ -3909,7 +3959,13 @@ app.registerExtension({
                 failed = { msg: nodeErrs || msg };
                 break outer;   // rest of this click's jobs would fail identically
               }
-              br.jobs.set(result.prompt_id, { seq: br.total + 1, edit: true, before: st.before });
+              // origin = everything needed to rebuild this job's inputs in the
+              // UI ("Use as… → original input"). Server-side names only, so a
+              // local File source is restorable after it's been uploaded.
+              br.jobs.set(result.prompt_id, {
+                seq: br.total + 1, edit: true, before: st.before,
+                origin: { src: st.before, ref: refBefore, mode: S.edit.mode, mask: maskName },
+              });
               br.total++;
             }
           }
@@ -4086,6 +4142,7 @@ app.registerExtension({
         cmpWrap.style.display = "none";
         S._cmp.clear();
         S._pfx.clear();
+        S._orig.clear();
         S._cmpOn = false;
         thumbScroller.replaceChildren();
         thumbStrip.style.display = "none";
@@ -4111,9 +4168,11 @@ app.registerExtension({
           const d = await r.json();
           if (d.ok) {
             S.lastImage = { filename: d.filename, subfolder: d.subfolder, type: "output" };
-            if (pair) {  // keep compare after the identity change
+            if (pair) {  // keep compare + the recorded inputs after the identity change
               S._cmp.set(cmpKey(S.lastImage), pair);
               if (pfx) S._pfx.set(cmpKey(S.lastImage), pfx);
+              const orig = S._orig.get(cmpKey(img));
+              if (orig) S._orig.set(cmpKey(S.lastImage), orig);
             }
             saveChip.style.display = "none";
             setStatus(`Saved as ${d.filename}`, C.ok);
