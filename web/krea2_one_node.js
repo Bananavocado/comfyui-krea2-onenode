@@ -44,9 +44,8 @@ const SAMPLERS = ["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp
 const SCHEDULERS = ["simple", "sgm_uniform", "normal", "karras", "exponential", "beta", "linear_quadratic", "kl_optimal"];
 const MODES = ["T2I", "EDIT", "UPSCALE"];
 
-// Scene tab: allowed per-row batch sizes and the rough per-image duration used
-// for the pre-run time estimate (user's machine averages ~2.5 min/image).
-const SCENE_BATCHES = [1, 2, 4, 8];
+// Batch tab: rough per-image duration used for the pre-run time estimate
+// (user's machine averages ~2.5 min/image).
 const PER_IMAGE_MIN = 2.5;
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -96,7 +95,9 @@ function defaultState() {
       steps: 10, cfg: 1, sampler: "euler", scheduler: "simple", denoise: 1,
     },
     tab: "t2i",                 // "t2i" | "scene" | "upscale" | "edit"
-    sceneRows: [{ prompt: "", batch: 1 }],
+    // BATCH tab (internal id "scene"): one prompt per line; each non-empty
+    // line queues one image on Generate.
+    sceneText: "",
   };
 }
 function loadState() {
@@ -128,11 +129,14 @@ function loadState() {
     if (s.tab === "t2iq") s.tab = "t2i";
     delete s.p1; delete s.p2; delete s.upscaleMethod; delete s.upscaleBy;
     if (!["t2i", "scene", "upscale", "edit"].includes(s.tab)) s.tab = "t2i";
-    if (!Array.isArray(s.sceneRows) || !s.sceneRows.length) s.sceneRows = [{ prompt: "", batch: 1 }];
-    s.sceneRows = s.sceneRows.map(r => ({
-      prompt: typeof r?.prompt === "string" ? r.prompt : "",
-      batch: SCENE_BATCHES.includes(r?.batch) ? r.batch : 1,
-    }));
+    // 2026-08-05: per-row scene prompts (+per-row batch) collapsed into one
+    // text blob, one prompt per line. Old rows migrate as one line each.
+    if (typeof s.sceneText !== "string") {
+      s.sceneText = Array.isArray(s.sceneRows)
+        ? s.sceneRows.map(r => (typeof r?.prompt === "string" ? r.prompt.trim() : "")).filter(Boolean).join("\n")
+        : "";
+    }
+    delete s.sceneRows;
     return s;
   }
   catch (e) { return defaultState(); }
@@ -543,7 +547,7 @@ if (!window.__krea2_listeners) {
       // same row starting must not repaint it as running.
       if (!a.S._scene.rows?.get(job.idx)?.error) a.sceneRowUpdate?.(job.idx, "running");
     }
-    if (d?.max) a.setStatus(job ? `Scene image ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
+    if (d?.max) a.setStatus(job ? `Batch image ${job.seq}/${a.S._scene.total} · Sampling ${d.value}/${d.max}` : `Sampling ${d.value}/${d.max}`);
   });
 
   api.addEventListener("executed", (evt) => {
@@ -619,12 +623,12 @@ if (!window.__krea2_listeners) {
         a.sceneRowUpdate?.(job.idx, "done");
       }
       if (sc.done >= sc.total) {
-        a.setStatus(`Scene complete — ${sc.total} image${sc.total > 1 ? "s" : ""} done.`, C.ok);
-        if (a.S.soundOn) playDone();  // single chime at scene end
+        a.setStatus(`Batch complete — ${sc.total} image${sc.total > 1 ? "s" : ""} done.`, C.ok);
+        if (a.S.soundOn) playDone();  // single chime at batch end
         a.S._scene = null;
         a.done();
       } else {
-        a.setStatus(`Scene ${sc.done}/${sc.total} images done.`);
+        a.setStatus(`Batch ${sc.done}/${sc.total} images done.`);
       }
       return;
     }
@@ -657,7 +661,7 @@ if (!window.__krea2_listeners) {
       const row = sc.rows?.get(job.idx);
       if (row) { row.done++; row.error = true; }
       a.sceneRowUpdate?.(job.idx, "error");
-      a.setStatus(`Scene image ${job.seq}/${sc.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
+      a.setStatus(`Batch image ${job.seq}/${sc.total} error in ${d?.node_type || "?"}: ${(d?.exception_message || "unknown").slice(0, 100)}`, C.err);
       if (sc.done >= sc.total) { a.S._scene = null; a.done(); }
       return;
     }
@@ -679,7 +683,7 @@ if (!window.__krea2_listeners) {
       // Stop already cleared the pending queue server-side; tear down locally.
       // (If Stop tore down first, _isOurs is already false — idempotent.)
       a.S._scene = null;
-      a.setStatus("Scene stopped.");
+      a.setStatus("Batch stopped.");
       a.done();
       return;
     }
@@ -854,8 +858,8 @@ app.registerExtension({
         if (m === "T2I") {
           pillT2I = p;
           p.title = "Text to image — ClownsharK two-pass + grain/sharpen";
-          pillScene = Pill("SCENE", S.tab === "scene", () => setTab("scene"), false);
-          pillScene.title = "Scene — queue multiple prompts in one run";
+          pillScene = Pill("BATCH", S.tab === "scene", () => setTab("scene"), false);
+          pillScene.title = "Batch — one prompt per line (paste or import .txt); Generate queues them all";
           toolbar.appendChild(pillScene);
         }
       }
@@ -1747,7 +1751,7 @@ app.registerExtension({
       // spacer then Generate pinned to bottom
       left.appendChild(mk("div", { flex: "1", minHeight: "10px" }));
 
-      // Scene time estimate (scene tab only) — sits just above the Generate row.
+      // Batch time estimate (batch tab only) — sits just above the Generate row.
       const estimateLine = mk("div", {
         display: "none", fontSize: "10px", fontWeight: "700",
         color: "rgba(240,255,65,.55)", marginBottom: "6px", whiteSpace: "nowrap",
@@ -1755,7 +1759,7 @@ app.registerExtension({
       });
       left.appendChild(estimateLine);
       function sceneImageCount() {
-        return S.sceneRows.reduce((n, r) => n + (r.prompt.trim() ? r.batch : 0), 0);
+        return sceneParse().length;
       }
       function fmtEst(mins) {
         if (mins >= 60) return `~${Math.floor(mins / 60)}h ${Math.round(mins % 60)}m`;
@@ -1806,7 +1810,6 @@ app.registerExtension({
       stopBtn.onclick = async (e) => {
         e.stopPropagation();
         if (S._scene || S._batchRun) {
-          const wasScene = !!S._scene;
           // Clear pending FIRST so the interrupt can't let the next queued job
           // start before the clear lands. NOTE: {clear:true} empties ALL
           // pending items in ComfyUI's server queue, not just this run's.
@@ -1822,7 +1825,7 @@ app.registerExtension({
           S._scene = null;
           S._batchRun = null;
           finishGenerate();
-          setStatus(wasScene ? "Scene stopped; queue cleared." : "Batch stopped; queue cleared.");
+          setStatus("Batch stopped; queue cleared.");
           return;
         }
         try { await api.fetchApi("/interrupt", { method: "POST" }); } catch (err) {}
@@ -1858,31 +1861,105 @@ app.registerExtension({
       genRow.append(genBtn, batchDD, stopBtn);
       left.appendChild(genRow);
 
-      // ── scene column (SCENE tab): multi-prompt queue ───────────────────────
+      // ── batch column (BATCH tab): one prompt per line + queue preview ──────
       const sceneCol = mk("div", {
         width: "300px", flexShrink: "0", minHeight: "0",
         display: "none", flexDirection: "column",
       });
-      sceneCol.appendChild(cap("Scene prompts"));
+      sceneCol.appendChild(cap("Batch prompts — one per line"));
+
+      // Every non-empty line = one prompt = one queued image.
+      function sceneParse() {
+        return (S.sceneText || "").split("\n").map(t => t.trim()).filter(Boolean);
+      }
+
+      const sceneChipRow = mk("div", {
+        display: "flex", gap: "6px", alignItems: "center", marginBottom: "6px", flexShrink: "0",
+      });
+      const sceneFileIn = mk("input", { display: "none" }, { type: "file", accept: ".txt,text/plain" });
+      const importSceneText = (text, label) => {
+        S.sceneText = String(text).replace(/\r\n?/g, "\n");
+        persist();
+        sceneTa.value = S.sceneText;
+        renderScenePreview(); updateEstimate();
+        const n = sceneParse().length;
+        setStatus(`Imported ${n} prompt${n === 1 ? "" : "s"}${label ? ` from ${label}` : ""}.`, n ? C.ok : C.warn);
+      };
+      sceneFileIn.onchange = async () => {
+        const f = sceneFileIn.files?.[0];
+        sceneFileIn.value = "";
+        if (!f) return;
+        try { importSceneText(await f.text(), f.name); }
+        catch (e) { setStatus(`Couldn't read file: ${e.message}`, C.err); }
+      };
+      const sceneImportBtn = LimeChip("Import .txt…", () => { if (!S._scene) sceneFileIn.click(); });
+      sceneImportBtn.title = "Load a text file — each line becomes one prompt (replaces the list)";
+      const sceneClearBtn = mk("button", {
+        background: "none", border: `1px solid ${C.border}`, borderRadius: "5px",
+        color: C.muted, fontSize: "9px", fontWeight: "700", cursor: "pointer",
+        padding: "3px 8px", outline: "none", flexShrink: "0",
+      }, { title: "Clear all prompts" });
+      tx(sceneClearBtn, "✕ Clear");
+      sceneClearBtn.onmouseenter = () => { sceneClearBtn.style.borderColor = C.err; sceneClearBtn.style.color = C.err; };
+      sceneClearBtn.onmouseleave = () => { sceneClearBtn.style.borderColor = C.border; sceneClearBtn.style.color = C.muted; };
+      sceneClearBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (S._scene) return;
+        S.sceneText = ""; persist();
+        sceneTa.value = "";
+        renderScenePreview(); updateEstimate();
+      };
+      noDrag(sceneClearBtn);
+      const sceneCount = mk("div", {
+        marginLeft: "auto", fontSize: "10px", fontWeight: "700",
+        color: "rgba(240,255,65,.55)", whiteSpace: "nowrap",
+      });
+      sceneChipRow.append(sceneImportBtn, sceneClearBtn, sceneCount);
+      sceneCol.append(sceneChipRow, sceneFileIn);
+
+      const sceneTa = mk("textarea", {
+        flex: "0 0 38%", minHeight: "70px", width: "100%", resize: "none",
+        background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "8px",
+        color: C.text, fontSize: "11px", padding: "7px 9px",
+        boxSizing: "border-box", outline: "none", lineHeight: "1.5",
+        fontFamily: "inherit", transition: "border-color .15s", display: "block",
+        overflowY: "auto", whiteSpace: "pre", marginBottom: "8px",
+      }, { placeholder: "One prompt per line…\nPaste here, or import / drop a .txt file.", spellcheck: false });
+      sceneTa.value = S.sceneText;
+      sceneTa.onfocus = () => sceneTa.style.borderColor = LIME;
+      sceneTa.onblur = () => sceneTa.style.borderColor = C.border;
+      sceneTa.oninput = () => {
+        S.sceneText = sceneTa.value; persist();
+        renderScenePreview(); updateEstimate();
+      };
+      sceneTa.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); sceneTa.blur(); } });
+      // Drop a .txt straight onto the textarea (same as Import).
+      sceneTa.addEventListener("dragover", (e) => { e.preventDefault(); e.stopPropagation(); sceneTa.style.borderColor = LIME; });
+      sceneTa.addEventListener("dragleave", () => { sceneTa.style.borderColor = C.border; });
+      sceneTa.addEventListener("drop", async (e) => {
+        e.preventDefault(); e.stopPropagation();
+        sceneTa.style.borderColor = C.border;
+        if (S._scene) return;
+        const f = [...(e.dataTransfer?.files || [])].find(f => /\.txt$/i.test(f.name) || f.type === "text/plain");
+        if (!f) return;
+        try { importSceneText(await f.text(), f.name); }
+        catch (err) { setStatus(`Couldn't read file: ${err.message}`, C.err); }
+      });
+      scrollGuard(sceneTa);
+      noDrag(sceneTa);
+      sceneCol.appendChild(sceneTa);
+
+      sceneCol.appendChild(cap("Queue preview"));
       const sceneRowsEl = mk("div", {
-        display: "flex", flexDirection: "column", gap: "8px",
+        display: "flex", flexDirection: "column", gap: "1px",
         overflowY: "auto", overflowX: "hidden", flex: "1", minHeight: "0", paddingRight: "2px",
       });
       scrollGuard(sceneRowsEl);
       sceneCol.appendChild(sceneRowsEl);
-      const sceneAddBtn = LimeChip("Add prompt", () => {
-        if (S._scene) return;
-        S.sceneRows.push({ prompt: "", batch: 1 });
-        persist(); renderSceneRows(); updateEstimate();
-      });
-      sceneAddBtn.style.alignSelf = "flex-start";
-      sceneAddBtn.style.marginTop = "8px";
-      sceneCol.appendChild(sceneAddBtn);
       mainRow.appendChild(sceneCol);
 
-      // Per-row status dots. Rebuilt with the rows; structural edits are locked
-      // while a scene runs, so indices stay valid for the whole run.
-      const SCENE_TA_MIN = 40, SCENE_TA_MAX = 160;
+      // Per-line status dots, index-aligned with sceneParse(). The textarea is
+      // read-only during a run, so indices stay valid for the whole run.
       let _sceneDots = [];
       function sceneDotSet(dot, status) {
         const m = {
@@ -1898,87 +1975,47 @@ app.registerExtension({
         const dot = _sceneDots[idx];
         if (dot) sceneDotSet(dot, status);
       }
-      // Structural edits (add/remove/batch) are disabled during a run so the
-      // row list can't drift out of sync with the submitted job snapshot;
-      // textareas stay editable (prompts are snapshotted at queue time).
       function syncSceneLock() {
         const lock = !!S._scene;
-        sceneAddBtn.style.pointerEvents = lock ? "none" : "";
-        sceneAddBtn.style.opacity = lock ? ".4" : "1";
-        sceneRowsEl.querySelectorAll("[data-k2-lock]").forEach(el => {
+        sceneTa.readOnly = lock;
+        sceneTa.style.opacity = lock ? ".6" : "1";
+        [sceneImportBtn, sceneClearBtn].forEach(el => {
           el.style.pointerEvents = lock ? "none" : "";
           el.style.opacity = lock ? ".4" : "1";
         });
       }
-      function renderSceneRows() {
+      function renderScenePreview() {
+        const prompts = sceneParse();
+        tx(sceneCount, prompts.length ? `${prompts.length} prompt${prompts.length === 1 ? "" : "s"}` : "");
         sceneRowsEl.replaceChildren();
         _sceneDots = [];
-        S.sceneRows.forEach((row, idx) => {
-          const r = mk("div", { display: "flex", alignItems: "flex-start", gap: "6px" });
-
+        if (!prompts.length) {
+          sceneRowsEl.appendChild(tx(mk("div", { color: C.muted, fontSize: "10px", padding: "6px 2px", lineHeight: "1.5" }),
+            "No prompts yet — type above, paste, or import a .txt (one prompt per line)."));
+          syncSceneLock();
+          return;
+        }
+        prompts.forEach((p, idx) => {
+          const r = mk("div", { display: "flex", alignItems: "center", gap: "6px", padding: "2px 2px" });
           const dot = mk("div", {
-            fontSize: "9px", fontWeight: "700", width: "12px", flexShrink: "0",
-            marginTop: "9px", textAlign: "center", color: C.muted, userSelect: "none",
+            fontSize: "9px", fontWeight: "700", width: "18px", flexShrink: "0",
+            textAlign: "right", color: C.muted, userSelect: "none",
           });
           dot._idx = idx;
           sceneDotSet(dot, "idle");
           _sceneDots.push(dot);
-          r.appendChild(dot);
-
-          const ta = mk("textarea", {
-            flex: "1", minWidth: "0", height: SCENE_TA_MIN + "px", resize: "none",
-            background: C.bg2, border: `1px solid ${C.border}`, borderRadius: "8px",
-            color: C.text, fontSize: "11px", padding: "7px 9px",
-            boxSizing: "border-box", outline: "none", lineHeight: "1.5",
-            fontFamily: "inherit", transition: "border-color .15s", display: "block",
-            overflowY: "hidden",
-          }, { placeholder: `Prompt ${idx + 1}…`, spellcheck: false });
-          ta.value = row.prompt;
-          const grow = () => {
-            ta.style.height = "auto";
-            const h = Math.min(Math.max(SCENE_TA_MIN, ta.scrollHeight), SCENE_TA_MAX);
-            ta.style.height = h + "px";
-            ta.style.overflowY = ta.scrollHeight > SCENE_TA_MAX ? "auto" : "hidden";
-          };
-          ta.onfocus = () => ta.style.borderColor = LIME;
-          ta.onblur = () => ta.style.borderColor = C.border;
-          // Input only mutates state — never re-render here (it would drop focus).
-          ta.oninput = () => { row.prompt = ta.value; persist(); grow(); updateEstimate(); };
-          ta.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); ta.blur(); } });
-          scrollGuard(ta);
-          noDrag(ta);
-          requestAnimationFrame(grow);
-          r.appendChild(ta);
-
-          const bWrap = mk("div", { width: "58px", flexShrink: "0", marginTop: "3px" });
-          bWrap.dataset.k2Lock = "1";
-          bWrap.appendChild(DD(() => SCENE_BATCHES, row.batch,
-            (n) => { row.batch = n; persist(); updateEstimate(); }, (n) => `×${n}`));
-          r.appendChild(bWrap);
-
-          const rm = mk("button", {
-            background: "none", border: "none", cursor: "pointer", padding: "0 2px",
-            color: C.muted, fontSize: "13px", outline: "none", flexShrink: "0", marginTop: "8px",
-          }, { title: "Remove" });
-          rm.dataset.k2Lock = "1";
-          tx(rm, "✕");
-          rm.onmouseenter = () => rm.style.color = C.err;
-          rm.onmouseleave = () => rm.style.color = C.muted;
-          rm.onclick = (e) => {
-            e.stopPropagation();
-            if (S._scene) return;
-            S.sceneRows.splice(idx, 1);
-            if (!S.sceneRows.length) S.sceneRows.push({ prompt: "", batch: 1 });
-            persist(); renderSceneRows(); updateEstimate();
-          };
-          r.appendChild(noDrag(rm));
-
+          const t = mk("div", {
+            flex: "1", minWidth: "0", fontSize: "10px", color: C.text,
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+          }, { title: p });
+          tx(t, p);
+          r.append(dot, t);
           sceneRowsEl.appendChild(r);
         });
         syncSceneLock();
       }
 
-      // Tab switching: one shared skeleton, scene swaps the T2I batch control,
+      // Tab switching: one shared skeleton, batch swaps the T2I batch control,
       // prompt bar and Generate label for the prompt-list column + estimate.
       function syncTab() {
         const scene = S.tab === "scene", up = S.tab === "upscale", ed = S.tab === "edit";
@@ -1999,7 +2036,7 @@ app.registerExtension({
         loraBox.style.display = up ? "none" : "flex";
         if (up || ed) whRow.style.display = "none";   // else syncSize() below decides
         if (!S._generating) {
-          tx(genBtn, scene ? "Run Scene" : up ? "Upscale" : ed ? "Edit" : "Generate");
+          tx(genBtn, scene ? "Run Batch" : up ? "Upscale" : ed ? "Edit" : "Generate");
           genBtn.appendChild(genSweep);
         }
         if (scene) updateEstimate();
@@ -2947,7 +2984,7 @@ app.registerExtension({
       const packsNote = mk("div", { fontSize: "9px", color: C.muted, lineHeight: "1.6", marginTop: "2px" });
       packsNote.innerHTML = "Install everything missing in one go: run <b>install_deps.sh</b> in this node's folder "
         + "(macOS: double-click <b>Install Dependencies.command</b>), then restart ComfyUI. "
-        + "<b>rgthree-comfy</b> is needed everywhere; T2I and SCENE also need RES4LYF, Krea2T-Enhancer, "
+        + "<b>rgthree-comfy</b> is needed everywhere; T2I and BATCH also need RES4LYF, Krea2T-Enhancer, "
         + "LayerStyle and WAS; EDIT needs krea2edit; UPSCALE needs fal-API. "
         + "Everything else the templates use (KSampler, LoadImage, ResizeImageMaskNode, SaveImage…) is ComfyUI core. "
         + "Apple Silicon: the float64→float32 MPS guard ships inside this node pack, nothing extra to install.";
@@ -3649,7 +3686,7 @@ app.registerExtension({
         S._generating = false;
         timerStop();
         progIdle();
-        tx(genBtn, S.tab === "scene" ? "Run Scene" : S.tab === "upscale" ? "Upscale" : S.tab === "edit" ? "Edit" : "Generate");
+        tx(genBtn, S.tab === "scene" ? "Run Batch" : S.tab === "upscale" ? "Upscale" : S.tab === "edit" ? "Edit" : "Generate");
         genBtn.appendChild(genSweep);
         genBtn.style.background = LIME;
         genBtn.style.color = "#111";
@@ -3775,7 +3812,7 @@ app.registerExtension({
       }
       async function doViewerUpscale(img, scale) {
         if (S._submitting) return;
-        if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
+        if (S._scene) { setStatus("Can't upscale during a batch run.", C.err); return; }
         S._submitting = true;
         try {
           await submitUpscaleJobs([{ imageName: annotatedName(img), scale, before: img }]);
@@ -3876,7 +3913,7 @@ app.registerExtension({
       }
       async function doRunEdit() {
         if (S._submitting) return;
-        if (S._scene) { setStatus("Can't edit during a scene run.", C.err); return; }
+        if (S._scene) { setStatus("Can't edit during a batch run.", C.err); return; }
         const src = S._editSrc;
         if (!src) { setStatus("Pick a source image first.", C.err); return; }
         if (!S.prompt.trim()) { setStatus("Enter an edit instruction first.", C.err); return; }
@@ -3990,7 +4027,7 @@ app.registerExtension({
 
       async function doRunUpscaleBatch() {
         if (S._submitting) return;
-        if (S._scene) { setStatus("Can't upscale during a scene run.", C.err); return; }
+        if (S._scene) { setStatus("Can't upscale during a batch run.", C.err); return; }
         const drop = S._upDrop;
         if (!drop?.length && !S.up.folder) { setStatus("Drop images or choose a folder first.", C.err); return; }
         S._submitting = true;
@@ -4034,14 +4071,12 @@ app.registerExtension({
         } finally { S._submitting = false; }
       }
 
-      // ── scene run: queue every prompt upfront (server-side queue does the
-      // sequencing, so the run survives the frontend sleeping overnight) ─────
+      // ── batch run: queue every line's prompt upfront (server-side queue does
+      // the sequencing, so the run survives the frontend sleeping overnight) ──
       async function doRunScene() {
         if (S._generating) return;
-        const rows = S.sceneRows
-          .map((r, i) => ({ prompt: r.prompt.trim(), batch: r.batch, idx: i }))
-          .filter(r => r.prompt);
-        if (!rows.length) { setStatus("Add at least one prompt.", C.err); return; }
+        const prompts = sceneParse();
+        if (!prompts.length) { setStatus("Add at least one prompt (one per line).", C.err); return; }
         S._generating = true;
         timerStart();
         progShow();
@@ -4050,78 +4085,72 @@ app.registerExtension({
         genBtn.style.background = C.bg3;
         genBtn.style.color = C.muted;
         syncStop(true);
-        setStatus("Queueing scene…");
+        setStatus(`Queueing ${prompts.length} prompt${prompts.length > 1 ? "s" : ""}…`);
         persist();
         try {
           const tpl = await getTemplate("quality");
-          S.sceneRows.forEach((_, i) => sceneRowUpdate(i, "idle"));
-          // Row batch ×N expands into N single-image jobs (seed, seed+1, …) —
-          // same reasoning as the T2I batch: batched latents degrade quality
-          // on MPS, and per-image jobs surface results as they finish.
-          // rows: Map(row idx -> {total, done, error}) drives the row dots.
+          _sceneDots.forEach(d => sceneDotSet(d, "idle"));
+          // One single-image job per line (batched latents degrade quality on
+          // MPS, and per-image jobs surface results as they finish).
+          // rows: Map(line idx -> {total, done, error}) drives the line dots.
           S._scene = { jobs: new Map(), total: 0, done: 0, rows: new Map() };
           syncSceneLock();
           // Register before the first POST — the first job can start emitting
-          // events while later rows are still being queued.
+          // events while later lines are still being queued.
           window.__krea2_active = { S, showImage, showBatch, galAdd, showPreviewBlob, setStatus, setStage, prog: currentProgPlan(), done: finishGenerate, sceneRowUpdate };
-          let lastSeed = null, seq = 0, rowsQueued = 0, failed = null;
-          queueLoop:
-          for (let si = 0; si < rows.length; si++) {
-            const r = rows[si];
-            const base = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
-            let rowQueued = 0;
-            for (let bi = 0; bi < r.batch; bi++) {
-              const prompt = buildPrompt(tpl, { promptText: r.prompt, batch: 1, seed: base + bi, forceSave: true });
-              const resp = await api.fetchApi("/prompt", {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
-              });
-              const result = await resp.json();
-              if (!resp.ok || result.error) {
-                const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
-                const nodeErrs = result?.node_errors && Object.values(result.node_errors)
-                  .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
-                sceneRowUpdate(r.idx, "error");
-                failed = { row: si + 1, msg: nodeErrs || msg };
-                // A /prompt rejection is almost always a shared settings/template
-                // problem — the remaining jobs would fail identically. Abort;
-                // already-queued jobs keep running and stay tracked.
-                if (rowQueued) S._scene.rows.set(r.idx, { total: rowQueued, done: 0, error: true });
-                break queueLoop;
-              }
-              S._scene.jobs.set(result.prompt_id, { idx: r.idx, seq: ++seq, status: "queued" });
-              rowQueued++;
+          // seed+i per line, so duplicate lines don't collapse into one cached
+          // result server-side.
+          const baseSeed = S.randomizeSeed ? Math.floor(Math.random() * 1e15) : S.seed;
+          let queued = 0, failed = null;
+          for (let i = 0; i < prompts.length; i++) {
+            const prompt = buildPrompt(tpl, { promptText: prompts[i], batch: 1, seed: baseSeed + i, forceSave: true });
+            const resp = await api.fetchApi("/prompt", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ prompt, client_id: api.clientId, extra_data: { enable_previews: true } }),
+            });
+            const result = await resp.json();
+            if (!resp.ok || result.error) {
+              const msg = result?.error?.message || result?.error || `HTTP ${resp.status}`;
+              const nodeErrs = result?.node_errors && Object.values(result.node_errors)
+                .flatMap(e => (e.errors || []).map(x => x.message)).join("; ");
+              sceneRowUpdate(i, "error");
+              failed = { line: i + 1, msg: nodeErrs || msg };
+              // A /prompt rejection is almost always a shared settings/template
+              // problem — the remaining jobs would fail identically. Abort;
+              // already-queued jobs keep running and stay tracked.
+              break;
             }
-            S._scene.rows.set(r.idx, { total: rowQueued, done: 0, error: false });
-            sceneRowUpdate(r.idx, "queued");
-            rowsQueued++;
-            lastSeed = base;
+            S._scene.jobs.set(result.prompt_id, { idx: i, seq: ++queued, status: "queued" });
+            S._scene.rows.set(i, { total: 1, done: 0, error: false });
+            sceneRowUpdate(i, "queued");
+            // Yield every few posts so a 100-line queue doesn't freeze the UI.
+            if (i % 10 === 9) await new Promise(r => setTimeout(r, 0));
           }
-          if (lastSeed != null) {
-            S.lastSeed = lastSeed;
-            if (S.randomizeSeed) { S.seed = lastSeed; seedIn.value = lastSeed; }
+          if (queued) {
+            S.lastSeed = baseSeed;
+            if (S.randomizeSeed) { S.seed = baseSeed; seedIn.value = baseSeed; }
             syncSeedUI();
             persist();
           }
           if (!S._scene.jobs.size) {
             S._scene = null;
             finishGenerate();
-            setStatus(failed ? `Scene failed to queue (row ${failed.row}): ${failed.msg}` : "Scene failed to queue.", C.err);
+            setStatus(failed ? `Batch failed to queue (line ${failed.line}): ${failed.msg}` : "Batch failed to queue.", C.err);
             return;
           }
           S._scene.total = S._scene.jobs.size;
           const images = S._scene.total;
-          tx(genBtn, "Running scene…");
+          tx(genBtn, "Running batch…");
           genBtn.appendChild(genSweep);
           setStatus(failed
-            ? `Scene: ${images} queued, row ${failed.row} failed: ${failed.msg}`
-            : `Scene queued — ${rowsQueued} prompt${rowsQueued > 1 ? "s" : ""} · ${images} image${images > 1 ? "s" : ""} · ${fmtEst(images * PER_IMAGE_MIN)}`,
+            ? `Batch: ${images} queued, line ${failed.line} failed: ${failed.msg}`
+            : `Batch queued — ${images} prompt${images > 1 ? "s" : ""} · ${fmtEst(images * PER_IMAGE_MIN)}`,
             failed ? C.warn : C.muted);
         } catch (e) {
           S._scene = null;
           finishGenerate();
           setStatus(`Error: ${e.message}`, C.err);
-          console.error("[Krea2OneNode] scene submit failed:", e);
+          console.error("[Krea2OneNode] batch submit failed:", e);
         }
       }
 
@@ -4181,7 +4210,7 @@ app.registerExtension({
       }
 
       syncSize();
-      renderSceneRows();
+      renderScenePreview();
       updateEstimate();
       syncTab();
 
