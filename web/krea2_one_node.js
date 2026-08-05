@@ -222,6 +222,16 @@ function Pill(txt, active, onClick, disabled) {
   return noDrag(b);
 }
 
+// Effective UI scale for panels that live on document.body (DD panels, tips,
+// rect math): the canvas zoom normally, or the fullscreen overlay's own scale
+// while a dashboard is fullscreened (the overlay bypasses the canvas
+// transform entirely, so ds.scale is wrong there).
+let _k2FsScale = null;   // non-null while a dashboard is fullscreen
+function uiScale() {
+  if (_k2FsScale) return _k2FsScale;
+  try { return app.canvas?.ds?.scale || 1; } catch (e) { return 1; }
+}
+
 function TBtn(txt, onClick, disabled) {
   const b = mk("button", {
     background: "transparent", border: `1.5px solid ${C.borderH}`,
@@ -414,11 +424,10 @@ function DD(items, selected, onChange, labelOf) {
   trig.onclick = () => {
     if (panel.style.display === "flex") { close(); return; }
     const rect = trig.getBoundingClientRect();
-    // The node UI is scaled by the canvas zoom, but this panel lives on
-    // document.body (unscaled). Scale it to match so it lines up with the
-    // trigger at any zoom level.
-    let s = 1;
-    try { s = app.canvas?.ds?.scale || 1; } catch (e) {}
+    // The node UI is scaled by the canvas zoom (or the fullscreen overlay),
+    // but this panel lives on document.body (unscaled). Scale it to match so
+    // it lines up with the trigger at any zoom level.
+    const s = uiScale();
     panel.style.transformOrigin = "top left";
     panel.style.transform = `scale(${s})`;
     panel.style.left = rect.left + "px";
@@ -750,6 +759,10 @@ app.registerExtension({
 
     nodeType.prototype._mountUI = function (root) {
       const self = this;
+      // A workflow switch can remount a dashboard that is currently
+      // fullscreened — pull it back out of the overlay first, or the widget
+      // system re-parents it with the fullscreen styles still applied.
+      root._k2ExitFs?.();
       // Widget size tracks the live node size so the dashboard fills the node
       // at any user-dragged size (the layout engine treats computeSize/
       // getMinHeight as fixed — it does not stretch DOM widgets for us).
@@ -831,6 +844,9 @@ app.registerExtension({
       // widget, so bubbling alone never reaches it). Scrollable child areas
       // stop propagation first when they actually have content to scroll.
       root.addEventListener("wheel", (e) => {
+        // Fullscreen: the dashboard isn't on the canvas — don't zoom the
+        // graph hiding behind the overlay.
+        if (_k2FsScale) { e.preventDefault(); return; }
         const cv = app.canvas?.canvas;
         if (cv) cv.dispatchEvent(new WheelEvent("wheel", {
           deltaY: e.deltaY, deltaX: e.deltaX,
@@ -888,7 +904,83 @@ app.registerExtension({
 
       const settingsBtn = TBtn("⚙ Settings", () => { settingsOverlay.style.display = "flex"; });
       toolbar.appendChild(settingsBtn);
+
+      // ── fullscreen (reference-node pattern): move the whole dashboard into a
+      // fixed overlay on document.body and scale it to fill the viewport. The
+      // node on the canvas goes blank until exit; Esc or the button exits.
+      const FS_EXPAND = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"/></svg>`;
+      const FS_COLLAPSE = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M8 3v5H3M16 3v5h5M8 21v-5H3M16 21v-5h5"/></svg>`;
+      const fsBtn = TBtn("", () => { _fsOn ? exitFullscreen() : enterFullscreen(); });
+      fsBtn.title = "Fullscreen";
+      fsBtn.style.padding = "4px 8px";
+      fsBtn.innerHTML = FS_EXPAND;
+      toolbar.appendChild(fsBtn);
       root.appendChild(toolbar);
+
+      let _fsOn = false, _fsOverlay = null, _fsWrap = null;
+      let _fsParent = null, _fsNext = null;
+      const _fsKey = (e) => {
+        if (e.key !== "Escape") return;
+        // Layered UIs keep Esc for themselves (their capture handlers are
+        // registered on open, i.e. after this one, so we must yield here).
+        if (lb.style.display !== "none" || mpWrap.style.display !== "none") return;
+        e.preventDefault(); e.stopPropagation();
+        exitFullscreen();
+      };
+      function enterFullscreen() {
+        if (_fsOn) return;
+        // Freeze the dashboard at its current rendered size (layout px —
+        // offsetWidth ignores the canvas transform) and scale that up.
+        const w = root.offsetWidth || MIN_W, h = root.offsetHeight || MIN_H;
+        if (!_fsOverlay) {
+          _fsOverlay = mk("div", {
+            // Below the DD panels / lightbox / ctx menu / tips (999999+), so
+            // body-level popups still show above the fullscreen dashboard.
+            position: "fixed", inset: "0", zIndex: "999000",
+            background: "rgba(6,6,8,.97)", display: "none",
+            alignItems: "center", justifyContent: "center",
+            boxSizing: "border-box", overflow: "hidden",
+          });
+          document.body.appendChild(_fsOverlay);
+        }
+        _fsParent = root.parentNode; _fsNext = root.nextSibling;
+        const sc = Math.min(window.innerWidth / w, window.innerHeight / h) * 0.97;
+        root.style.width = w + "px"; root.style.height = h + "px";
+        root.style.position = "absolute"; root.style.top = "0"; root.style.left = "0";
+        root.style.margin = "0";
+        root.style.transformOrigin = "top left";
+        root.style.transform = `scale(${sc})`;
+        _fsWrap = mk("div", {
+          width: Math.round(w * sc) + "px", height: Math.round(h * sc) + "px",
+          position: "relative", flexShrink: "0", overflow: "hidden",
+        });
+        _fsWrap.appendChild(root);
+        _fsOverlay.appendChild(_fsWrap);
+        _fsOverlay.style.display = "flex";
+        _k2FsScale = sc;
+        fsBtn.innerHTML = FS_COLLAPSE;
+        fsBtn.title = "Exit fullscreen (Esc)";
+        document.addEventListener("keydown", _fsKey, true);
+        _fsOn = true;
+      }
+      function exitFullscreen() {
+        if (!_fsOn) return;
+        if (_fsParent) {
+          if (_fsNext) _fsParent.insertBefore(root, _fsNext);
+          else _fsParent.appendChild(root);
+        }
+        root.style.position = ""; root.style.top = ""; root.style.left = "";
+        root.style.margin = ""; root.style.width = "100%"; root.style.height = "100%";
+        root.style.transform = ""; root.style.transformOrigin = "";
+        _fsWrap?.remove(); _fsWrap = null;
+        _fsOverlay.style.display = "none";
+        _k2FsScale = null;
+        fsBtn.innerHTML = FS_EXPAND;
+        fsBtn.title = "Fullscreen";
+        document.removeEventListener("keydown", _fsKey, true);
+        _fsOn = false;
+      }
+      root._k2ExitFs = exitFullscreen;
 
       // ── main row ───────────────────────────────────────────────────────────
       const mainRow = mk("div", { display: "flex", gap: "12px", alignItems: "stretch", flex: "1", minHeight: "0" });
@@ -1556,8 +1648,7 @@ app.registerExtension({
       function showTip(anchor, text) {
         tipFor = anchor;
         tx(tipEl, text);
-        let s = 1;
-        try { s = app.canvas?.ds?.scale || 1; } catch (e) {}
+        const s = uiScale();
         tipEl.style.transform = `scale(${s})`;
         tipEl.style.display = "block";
         const r = anchor.getBoundingClientRect();
@@ -2340,6 +2431,9 @@ app.registerExtension({
         if (_nmeBusy) return;
         const src = S._editSrc;
         if (!src) { setStatus("Pick a source image first.", C.err); return; }
+        // ComfyUI's mask editor is a canvas-level dialog (below our overlay)
+        // and needs a selected graph node — leave fullscreen first.
+        exitFullscreen();
         _nmeBusy = true;
         let temp = null;
         const cleanup = () => {
@@ -2429,8 +2523,7 @@ app.registerExtension({
           mp.h = im.naturalHeight;
           // fit the display canvas into the stage
           const sr = mpStage.getBoundingClientRect();
-          let sc = 1;
-          try { sc = app.canvas?.ds?.scale || 1; } catch (e) {}
+          const sc = uiScale();
           const availW = Math.max(64, sr.width / sc - 16), availH = Math.max(64, sr.height / sc - 16);
           const f = Math.min(availW / mp.w, availH / mp.h, 1);
           mpCanvas.width = Math.max(1, Math.round(mp.w * f));
@@ -3118,8 +3211,7 @@ app.registerExtension({
         // scroll offsets aren't — divide the delta back out).
         const w = kids[selIdx];
         if (w) {
-          let sc = 1;
-          try { sc = app.canvas?.ds?.scale || 1; } catch (e) {}
+          const sc = uiScale();
           const sr = thumbScroller.getBoundingClientRect(), wr = w.getBoundingClientRect();
           if (wr.left < sr.left) thumbScroller.scrollBy({ left: (wr.left - sr.left - 24 * sc) / sc, behavior: "smooth" });
           else if (wr.right > sr.right) thumbScroller.scrollBy({ left: (wr.right - sr.right + 24 * sc) / sc, behavior: "smooth" });
